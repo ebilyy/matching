@@ -1,0 +1,5 @@
+DROP INDEX IF EXISTS idx_match_proposals_shop_id_supplier_position_id;
+DROP INDEX IF EXISTS idx_match_proposals_shop_id_category_confidence;
+DROP INDEX IF EXISTS idx_match_proposals_shop_id_brand_confidence;
+DROP INDEX IF EXISTS idx_match_proposals_shop_id_confidence;
+DROP TABLE IF EXISTS match_proposals;

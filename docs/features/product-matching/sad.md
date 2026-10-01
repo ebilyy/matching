@@ -253,6 +253,176 @@ sequenceDiagram
     API-->>UI: створено X зіставлень, пропущено Y вже вирішених
 ```
 
+**Покриття user stories потоками** (`sdlc:complete-sequence-diagrams`, 2026-10-01):
+
+| US | Потік |
+|---|---|
+| US-01 | US-01 нижче |
+| US-02 | Critical flow 1, 2 (файл) + US-02 нижче (фід за розкладом) |
+| US-03 | Critical flow 1 — каскад (a) |
+| US-04 | Critical flow 3, 4 |
+| US-05 | Critical flow 1 — каскад (b) |
+| US-06 | US-06 нижче |
+| US-07 | trivial — SELECT з inline-проєкцій, окремий потік не потрібен |
+| US-08 | US-08 нижче |
+
+### US-01: Переглянути готовність каталогу до зіставлення
+
+Завантаження каталогу через спільний конвеєр (ADR-0002) + підрахунок готовності (AC-01).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Manager as Менеджер
+    participant UI as Web UI
+    participant API as api
+    participant S3 as Object storage (ЄС)
+    participant PG as Postgres
+    participant W as worker
+    Note over Manager,API: Precondition: магазин створено — запит несе RequestContext (shop_id, manager_id) (§8)
+    Manager->>UI: завантажує файл каталогу, вказує колонки (назва, штрихкод, артикул виробника)
+    UI->>API: файл + розмітка колонок (catalog → file-intake: ліміт розміру, ліміт 30/год)
+    API->>S3: кладе оригінал файлу
+    API->>PG: одна транзакція: імпорт каталогу (status=queued) + задача pg-boss
+    API-->>UI: 202 — імпорт прийнято, обробка у фоні
+    W->>PG: бере задачу (SKIP LOCKED), відновлює RequestContext із задачі
+    W->>S3: потоково читає файл
+    W->>W: розбір у staging, нормалізація кодів, валідація (file-intake)
+    alt колонку назви не вказано, файл понад ліміти або рядки некоректні
+        W->>PG: імпорт status=rejected + колонки й рядки з помилками
+        Note over W,PG: попередній каталог діє далі
+    else валідація пройшла
+        W->>PG: upsert власних товарів пачками (catalog) — зниклі → archived, зіставлення зберігаються (§11 default)
+        W->>PG: імпорт status=applied
+    end
+    Manager->>UI: відкриває каталог
+    UI->>API: запит готовності каталогу (catalog)
+    API->>PG: COUNT власних товарів і COUNT без штрихкоду й артикулу (фільтр shop_id)
+    PG-->>API: total, without_reliable_code
+    API-->>UI: N товарів, з них K без надійного коду — зіставляться лише через чергу
+    Note over Manager,PG: Postcondition: власні товари доступні для каскаду (AC-01). Чи перезапускати каскад для нових товарів — не визначено
+```
+
+### US-02: Завантажити прайс постачальника — фід за розкладом
+
+Async: щоденне або ручне забирання фіду; ідемпотентність, повтори, DLQ. Розбір і каскад — як Critical flow 1/2. <!-- TODO: align with openapi.yaml -->
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Manager as Менеджер
+    participant API as api
+    participant PG as Postgres
+    participant W as worker
+    participant Feed as Фід постачальника
+    participant S3 as Object storage (ЄС)
+    Note over PG,W: Precondition: постачальник має URL фіду й запам'ятовану схему колонок (AC-02)
+    alt щоденний розклад
+        W->>PG: pg-boss cron: задача feed.fetch на кожного постачальника з фідом, key = supplier_id + дата
+    else «забрати зараз» вручну
+        Manager->>API: забрати фід постачальника
+        API->>PG: задача feed.fetch, key = supplier_id + request_id
+        API-->>Manager: 202 — забирання поставлено в чергу
+    end
+    W->>PG: бере задачу (SKIP LOCKED) — RequestContext (shop_id, manager_id = system)
+    W->>PG: check idempotency key: імпорт з цим key вже існує?
+    alt імпорт з цим key вже є (повтор задачі після рестарту)
+        W->>PG: задача complete без дій
+    else ліміт 30 завантажень/год на магазин вичерпано
+        W->>PG: перенести задачу (startAfter +1 год)
+    else новий key
+        W->>Feed: HTTPS GET (SSRF-guard: DNS → лише публічні IP, ≤ 3 редиректи, таймаут 30 с, ≤ 50 МБ)
+        Note over W,Feed: retry up to 3 with exponential backoff (pg-boss retryLimit / retryBackoff)
+        alt 200 OK
+            Feed-->>W: файл прайсу
+            W->>S3: кладе оригінал
+            W->>PG: одна транзакція: імпорт (source=feed, key, status=queued) + задача price-import
+            Note over W,PG: далі як Critical flow 1 (розбір → диф → каскад) або flow 2 (відхилено / awaiting_mapping)
+        else приватна адреса, редирект на приватну або розмір понад ліміт
+            W->>PG: імпорт status=rejected (причина безпеки), без повторів
+        else таймаут або 5xx — 3 спроби вичерпано
+            W->>PG: задача → DLQ (feed.fetch.dlq) — попередній прайс діє далі
+            Note over W,PG: алерт «фід не забрався 2 доби поспіль» (§7)
+        end
+    end
+    Note over Manager,PG: Postcondition: позиції оновлені з датою прайсу або попередній прайс діє далі — результат видно в списку імпортів
+```
+
+### US-06: Скасувати зіставлення й бачити історію
+
+AC-13, AC-14. Скасування — подія в журналі (ADR-0004), історія — читання журналу.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Manager as Менеджер
+    participant UI as Web UI
+    participant API as api
+    participant PG as Postgres
+    Note over Manager,API: Precondition: є зіставлення (автоматичне або підтверджене) у match_view
+    Manager->>UI: скасовує зіставлення (бачив версію потоку v)
+    UI->>API: скасування (review → match-ledger)
+    API->>PG: знайти потік пари (фільтр shop_id)
+    alt пари немає в цьому магазині
+        API-->>UI: 404
+    else пара знайдена
+        API->>PG: одна транзакція: append MatchCancelled (manager_id, at) з stream_version = v+1 + оновлення проєкцій
+        Note over API,PG: match_view — пару прибрано — remembered_decision_view — «відхилено» з поточним відбитком — покриття перераховано
+        alt ok
+            PG-->>API: ok
+            API-->>UI: скасовано — ціна й наявність цієї позиції більше не використовуються
+        else конфлікт версії (вже скасував інший менеджер або новий імпорт змінив стан)
+            PG-->>API: порушення унікальності (stream_id, stream_version)
+            API-->>UI: 409 — стан змінився, оновіть сторінку
+        end
+    end
+    Manager->>UI: відкриває історію власного товару
+    UI->>API: запит історії (match-ledger)
+    API->>PG: SELECT match_event за потоками цього товару ORDER BY час (фільтр shop_id)
+    PG-->>API: AutoMatched (код), ProposalConfirmed (manager_id), MatchCancelled (manager_id), ...
+    API-->>UI: хто створив (система з поясненням чи менеджер), хто підтвердив чи скасував, коли
+    Note over Manager,PG: Postcondition: каскад (a) і (b) бачать відхилення — пара не створюється знову автоматично (AC-13)
+```
+
+### US-08: Бачити актуальну ціну й наявність
+
+AC-16, AC-17, AC-18 — read-side правила в модулі `offers`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Manager as Менеджер
+    participant UI as Web UI
+    participant API as api
+    participant PG as Postgres
+    Note over Manager,API: Precondition: власний товар має зіставлення та/або пропозиції
+    Manager->>UI: відкриває власний товар
+    UI->>API: запит цін і наявності (offers)
+    API->>PG: match_view ⨝ supplier_position ⨝ дата останнього прайсу постачальника (фільтр shop_id)
+    API->>PG: proposal_queue_view — кандидати цього товару
+    alt товару немає в цьому магазині
+        PG-->>API: 0 рядків
+        API-->>UI: 404
+    else товар знайдено
+        PG-->>API: зіставлені позиції + кандидати
+        Note over API,PG: пари, повернуті в чергу через зміну відбитка (AC-11), у match_view відсутні — їхні ціни не беруться
+        loop кожна зіставлена позиція постачальника
+            opt позиції немає в останньому прайсі — absent_since задано (AC-17)
+                API->>API: наявність «відсутня в останньому прайсі» + дата прайсу — зіставлення зберігається
+            end
+            opt останній прайс постачальника старший за 7 днів (AC-18)
+                API->>API: позначка «застаріло» + дата прайсу
+            end
+        end
+        opt є кандидати з пропозицій (AC-16)
+            API->>API: ціна й наявність кандидата — лише з позначкою «не підтверджено», не як закупівельні
+        end
+        API-->>UI: закупівельні ціна й наявність по постачальниках + кандидати окремим блоком
+    end
+    Note over Manager,API: Postcondition: менеджер бачить лише підтверджені закупівельні дані з датою прайсу (інваріант CONTEXT)
+```
+
+
 ## 7. Deployment view
 
 Одна VM з Docker Compose за формою `price-infrastructure` (s-price): `caddy` (TLS + SPA + reverse proxy), `api` ×1, `worker` ×1, `postgres` 18.4, одноразовий `migrate` (TypeORM migrations перед стартом `api`/`worker`) і `backup` (щоденний `pg_dump` поза VM — в окремий bucket того ж провайдера, що й ADR-0006). Оригінали файлів — у керованому bucket ЄС (ADR-0006). Availability 99.5% за місяць (PRD §6) ≈ 3.6 год простою — одна VM це покриває; деплой — `docker compose up` з коротким простоєм `api`, незавершені задачі `worker` pg-boss повторює після рестарту.

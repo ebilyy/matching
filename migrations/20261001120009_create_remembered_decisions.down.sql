@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_remembered_decisions_shop_id_supplier_position_id;
+DROP TABLE IF EXISTS remembered_decisions;

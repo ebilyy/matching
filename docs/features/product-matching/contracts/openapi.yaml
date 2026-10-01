@@ -1,0 +1,1850 @@
+openapi: 3.1.0
+info:
+  title: product-matching API
+  version: 0.1.0
+  contact:
+    name: Backend Lead (product-matching)
+  description: |
+    <!-- Stage 10 → .claude/skills/api-forge/SKILL.md. Scenario A (derived from data-model.md). Report: ./api-sync-report.md -->
+
+    **Why this API exists.** Інтернет-магазини з каталогом 5–50 тис. товарів отримують прайси від кількох
+    постачальників у різних форматах і зводять їх із каталогом вручну, на що йдуть дні на кожне оновлення
+    (idea-brief §2). product-matching каскадно зіставляє власні товари магазину з позиціями прайсів
+    постачальників: автоматично за надійним кодом або запам'ятованим рішенням, решту подає менеджеру
+    чергою підтвердження з поясненням (PRD §1, SAD §4). Менеджер бачить закупівельну ціну й наявність лише
+    через підтверджені зіставлення (інваріант CONTEXT).
+
+    **Conventions**
+    - Tenancy (ADR-0008): `shop_id` never appears in paths or bodies. Every request resolves to
+      `RequestContext {shop_id, manager_id}` from its credential. A resource of another shop answers
+      `404 <entity>.not_found` (AC-12). The credential scheme is an open question (SAD §11); `BearerAuth`
+      is the placeholder.
+    - Errors (SAD §8 + api-forge default): `application/problem+json` (RFC 9457) with extension members
+      `code` (`<module>.<error_name>`), `message`, `details`. Validation → 422, version conflict → 409.
+    - A match / proposal has no UUID: it is the ledger stream `(own_product_id, supplier_position_id)`
+      (ADR-0004). Every decision carries the `stream_version` the client saw; a stale version → 409.
+    - Lists use opaque cursors (`after` / `before` / `limit`).
+    - Money (`NUMERIC(14,4)`) travels as a decimal string. Times are RFC 3339 UTC.
+    - Long-running work (file parsing, cascade, feed fetch) is asynchronous: the API answers 202 with an
+      `Import`, the client polls `GET /api/v1/imports/{import_id}` (SAD §6 flow 1).
+
+    Inputs: PRD.md §4–§6.1 · data-model.md · sad.md §4–§8, §6 sequences · ADR-0001…0008.
+
+servers:
+  - url: http://localhost:3000
+    description: Local (NestJS api, ADR-0001)
+  - url: https://{host}
+    description: Pilot VM behind Caddy (SAD §7)
+    variables:
+      host:
+        default: product-matching.example.test
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: catalog
+    description: Own products — catalog upload (ADR-0002), readiness (US-01)
+  - name: suppliers
+    description: Suppliers, remembered column mapping, price upload and feed fetch (US-02)
+  - name: imports
+    description: Catalog and price imports — status, issues, mapping confirmation (AC-02…AC-04)
+  - name: review
+    description: Review queue — list, confirm / reject, bulk confirm, cancel (US-04, US-06)
+  - name: offers
+    description: Purchase price and availability, history, coverage (US-06…US-08)
+  - name: ops
+    description: Operational endpoints
+
+paths:
+  /health:
+    get:
+      tags: [ops]
+      summary: Liveness check
+      description: Uptime probe for the 99.5% availability target (SAD §7, §10). Public.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: The api process is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: ok }
+
+  # ---------------------------------------------------------------- catalog
+  /api/v1/catalog/imports:
+    post:
+      tags: [catalog]
+      summary: Upload the own catalog
+      description: |
+        Accepts a catalog file (XLSX / CSV) with its column mapping and queues it for the worker
+        (SAD §6 US-01, ADR-0002). Products are upserted by `sku`; products missing from the new file get
+        `archived_at` and keep their matches (data-model TBD-2). The mapping must assign the roles
+        `sku` and `name`. Limits: file ≤ 50 MB, ≤ 30 uploads per shop per hour (PRD §6.1, SAD §8).
+      operationId: uploadCatalog
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/CatalogUpload" }
+            encoding:
+              column_mapping: { contentType: application/json }
+            example:
+              file: "<binary catalog.xlsx>"
+              column_mapping:
+                columns:
+                  - { header: "Артикул", role: sku }
+                  - { header: "Назва", role: name }
+                  - { header: "Штрихкод", role: barcode }
+                  - { header: "Код виробника", role: manufacturer_code }
+                  - { header: "Бренд", role: brand }
+                  - { header: "Категорія", role: category }
+      responses:
+        "202":
+          description: Import queued (status `queued`). Poll `getImport`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Import" }
+              examples:
+                queued: { $ref: "#/components/examples/CatalogImportQueued" }
+        "200":
+          description: Idempotent replay — an import with this `Idempotency-Key` already exists; it is returned unchanged.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Import" }
+              examples:
+                replay: { $ref: "#/components/examples/CatalogImportQueued" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "413": { $ref: "#/components/responses/FileTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/InvalidColumnMapping" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/catalog/readiness:
+    get:
+      tags: [catalog]
+      summary: Catalog readiness for matching
+      description: |
+        Total own products and how many have neither barcode nor manufacturer code — those can be
+        matched only through the review queue (AC-01). Archived products are excluded.
+      operationId: getCatalogReadiness
+      responses:
+        "200":
+          description: Readiness counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CatalogReadiness" }
+              example: { own_products_total: 4000, without_reliable_code: 520 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/own-products:
+    get:
+      tags: [catalog]
+      summary: List own products
+      description: Own products of the shop, newest first (UUID v7 order). Entry point to offers and history (US-06, US-08).
+      operationId: listOwnProducts
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Before"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of own products.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OwnProductPage" }
+              example:
+                items:
+                  - id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81
+                    sku: SKU-0001
+                    name: "Test Product 1, 500 мл"
+                    barcode: "4820000000017"
+                    manufacturer_code: "TP-500"
+                    brand: "Test Brand"
+                    category: "Побутова хімія / Миття"
+                    archived_at: null
+                    created_at: "2026-10-01T08:00:00Z"
+                has_next: true
+                has_prev: false
+                next_cursor: "eyJpZCI6IjAxOTlhM2MxLTJiNGQifQ"
+                prev_cursor: null
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/own-products/{own_product_id}/offers:
+    get:
+      tags: [offers]
+      summary: Purchase price and availability of an own product
+      description: |
+        Offers come **only** from matches (CONTEXT invariant). Each offer carries the price date,
+        `absent_in_latest_price` (AC-17) and `is_stale` when the supplier's price is older than 7 days
+        (AC-18). Proposals of this product are returned separately as `candidates`, always
+        `confirmed: false` (AC-16). Pairs returned to the queue (AC-11) are candidates, not offers
+        (SAD §6 US-08).
+      operationId: getOwnProductOffers
+      parameters:
+        - $ref: "#/components/parameters/OwnProductId"
+      responses:
+        "200":
+          description: Offers and unconfirmed candidates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OwnProductOffers" }
+              examples:
+                withOffersAndCandidate: { $ref: "#/components/examples/OwnProductOffers" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/OwnProductNotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/own-products/{own_product_id}/history:
+    get:
+      tags: [offers]
+      summary: Match history of an own product
+      description: |
+        Ledger events of every stream of this product, oldest first: who created each match (system with
+        explanation, or a manager), who confirmed, rejected or cancelled it, and when (AC-13, AC-14).
+        Not paginated: a product has a handful of events (data-model, match_events).
+      operationId: getOwnProductHistory
+      parameters:
+        - $ref: "#/components/parameters/OwnProductId"
+      responses:
+        "200":
+          description: History events.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MatchHistory" }
+              examples:
+                autoThenCancelled: { $ref: "#/components/examples/MatchHistory" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/OwnProductNotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  # ---------------------------------------------------------------- suppliers
+  /api/v1/suppliers:
+    get:
+      tags: [suppliers]
+      summary: List suppliers
+      description: Suppliers of the shop (≤ 10 per shop, PRD §6) with price date and staleness (AC-18).
+      operationId: listSuppliers
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Before"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of suppliers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SupplierPage" }
+              example:
+                items:
+                  - id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+                    name: "Test Supplier"
+                    feed_url: null
+                    column_mapping: null
+                    price_date: "2026-09-30T06:00:00Z"
+                    is_price_stale: false
+                    created_at: "2026-09-20T09:00:00Z"
+                has_next: false
+                has_prev: false
+                next_cursor: null
+                prev_cursor: null
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+    post:
+      tags: [suppliers]
+      summary: Add a supplier
+      description: |
+        Precondition of AC-02 ("доданий постачальник"). `feed_url` enables the feed (manual fetch and the
+        daily schedule, SAD §3); only public `http(s)` URLs are accepted (PRD §6.1). The SSRF check on the
+        resolved address happens at fetch time in the worker.
+      operationId: createSupplier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SupplierCreate" }
+            example: { name: "Test Supplier", feed_url: "https://feeds.example.test/price.xlsx" }
+      responses:
+        "201":
+          description: Supplier created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Supplier" }
+              examples:
+                created: { $ref: "#/components/examples/SupplierNew" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/suppliers/{supplier_id}:
+    get:
+      tags: [suppliers]
+      summary: Get a supplier
+      description: Supplier with its remembered column mapping (AC-02) and price date (AC-18).
+      operationId: getSupplier
+      parameters:
+        - $ref: "#/components/parameters/SupplierId"
+      responses:
+        "200":
+          description: The supplier.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Supplier" }
+              examples:
+                withMapping: { $ref: "#/components/examples/Supplier" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/SupplierNotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/suppliers/{supplier_id}/price-imports:
+    post:
+      tags: [suppliers]
+      summary: Upload a supplier price
+      description: |
+        Accepts a price file (XLSX / CSV) and queues it (SAD §6 flow 1). `column_mapping` is required on
+        the first upload of a supplier and must assign the roles `name` and `price` (AC-03); afterwards it
+        may be omitted and the remembered mapping is used (AC-02). If the file's columns differ from the
+        remembered mapping, the import ends in `awaiting_mapping` (AC-04, flow 2) and the previous price
+        stays in force. Limits: file ≤ 50 MB, ≤ 100 000 rows, ≤ 30 uploads per shop per hour (PRD §6.1).
+      operationId: uploadSupplierPrice
+      parameters:
+        - $ref: "#/components/parameters/SupplierId"
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/PriceUpload" }
+            encoding:
+              column_mapping: { contentType: application/json }
+            example:
+              file: "<binary price.xlsx>"
+              column_mapping:
+                columns:
+                  - { header: "Код", role: supplier_code }
+                  - { header: "Найменування", role: name }
+                  - { header: "EAN", role: barcode }
+                  - { header: "Ціна", role: price }
+                  - { header: "Залишок", role: stock_quantity }
+                  - { header: "Примітка", role: null }
+      responses:
+        "202":
+          description: Import queued. Poll `getImport` for `applied`, `rejected` or `awaiting_mapping`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Import" }
+              examples:
+                queued: { $ref: "#/components/examples/PriceImportQueued" }
+        "200":
+          description: Idempotent replay — the existing import with this `Idempotency-Key`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Import" }
+              examples:
+                replay: { $ref: "#/components/examples/PriceImportQueued" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/SupplierNotFound" }
+        "413": { $ref: "#/components/responses/FileTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/InvalidColumnMapping" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/suppliers/{supplier_id}/feed-fetches:
+    post:
+      tags: [suppliers]
+      summary: Fetch the supplier feed now
+      description: |
+        Queues a `feed.fetch` job (SAD §6 US-02, "забрати зараз"). The worker builds the import
+        idempotency key from `supplier_id` + `Idempotency-Key`, so a retried request or a restarted job
+        never creates a second import. The rate limit (30/h) is applied by the worker, which reschedules
+        the job instead of failing it. The resulting import appears in `listImports` with `source: feed`.
+      operationId: fetchSupplierFeed
+      parameters:
+        - $ref: "#/components/parameters/SupplierId"
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      responses:
+        "202":
+          description: Fetch queued (also on replay of the same key).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeedFetchAccepted" }
+              example:
+                supplier_id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+                idempotency_key: 2b7c1e0a-4f7d-4c55-9d0e-1a2b3c4d5e6f
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/SupplierNotFound" }
+        "409": { $ref: "#/components/responses/FeedNotConfigured" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  # ---------------------------------------------------------------- imports
+  /api/v1/imports:
+    get:
+      tags: [imports]
+      summary: List imports
+      description: Catalog and price imports of the shop, newest first; optionally of one supplier.
+      operationId: listImports
+      parameters:
+        - name: supplier_id
+          in: query
+          required: false
+          description: Only imports of this supplier.
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Before"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of imports.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportPage" }
+              example:
+                items:
+                  - id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b4
+                    kind: price
+                    source: upload
+                    status: applied
+                    supplier_id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+                    uploaded_by: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+                    original_filename: "price-2026-10-01.xlsx"
+                    column_mapping: { columns: [{ header: "Найменування", role: name }, { header: "Ціна", role: price }] }
+                    issues: null
+                    rows_recognized: 48210
+                    auto_matched_count: 31877
+                    proposals_count: 2904
+                    created_at: "2026-10-01T09:00:00Z"
+                    started_at: "2026-10-01T09:00:02Z"
+                    finished_at: "2026-10-01T09:06:41Z"
+                has_next: false
+                has_prev: false
+                next_cursor: null
+                prev_cursor: null
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/imports/{import_id}:
+    get:
+      tags: [imports]
+      summary: Get an import
+      description: |
+        Status and result of one import. `applied` carries the counts "N recognized, M auto-matched,
+        K proposals" (AC-02, flow 1); `rejected` carries invalid columns and rows (AC-03) or a feed
+        rejection reason; `awaiting_mapping` carries the column differences (AC-04).
+      operationId: getImport
+      parameters:
+        - $ref: "#/components/parameters/ImportId"
+      responses:
+        "200":
+          description: The import.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Import" }
+              examples:
+                applied: { $ref: "#/components/examples/PriceImportApplied" }
+                rejected: { $ref: "#/components/examples/PriceImportRejected" }
+                awaitingMapping: { $ref: "#/components/examples/PriceImportAwaitingMapping" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ImportNotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/imports/{import_id}/confirm-mapping:
+    post:
+      tags: [imports]
+      summary: Confirm a new column mapping
+      description: |
+        For an import in `awaiting_mapping` (AC-04): stores the mapping as the supplier's remembered
+        mapping and re-queues the same file from storage, in one transaction (SAD §6 flow 2). The import
+        returns to `queued`.
+      operationId: confirmImportMapping
+      parameters:
+        - $ref: "#/components/parameters/ImportId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ColumnMappingConfirmation" }
+            example:
+              column_mapping:
+                columns:
+                  - { header: "Код", role: supplier_code }
+                  - { header: "Найменування", role: name }
+                  - { header: "Ціна, грн", role: price }
+                  - { header: "EAN", role: barcode }
+      responses:
+        "202":
+          description: Mapping saved, import re-queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Import" }
+              examples:
+                requeued: { $ref: "#/components/examples/PriceImportQueued" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ImportNotFound" }
+        "409": { $ref: "#/components/responses/ImportNotAwaitingMapping" }
+        "422": { $ref: "#/components/responses/InvalidColumnMapping" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  # ---------------------------------------------------------------- review
+  /api/v1/match-proposals:
+    get:
+      tags: [review]
+      summary: List the review queue
+      description: |
+        Proposals by confidence, highest first, each with its explanation — which features matched,
+        which did not, what changed (AC-08, AC-07, AC-11). Optional filter by brand or category (US-04).
+        Page of 50 p95 ≤ 1 s at 50 000 own products (PRD §6, `match_queue.list`).
+      operationId: listMatchProposals
+      parameters:
+        - $ref: "#/components/parameters/BrandFilter"
+        - $ref: "#/components/parameters/CategoryFilter"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Before"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of proposals.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MatchProposalPage" }
+              example:
+                items:
+                  - own_product: { id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81, sku: SKU-0001, name: "Test Product 1, 500 мл", barcode: null, manufacturer_code: null, brand: "Test Brand", category: null, archived_at: null, created_at: "2026-10-01T08:00:00Z" }
+                    supplier_position: { id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3, supplier: { id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192, name: "Test Supplier" }, supplier_code: "SUP-1", name: "TEST PRODUCT 1 0.5L", barcode: null, manufacturer_code: null, brand: "Test Brand", price: "84.5000", in_stock: true, stock_quantity: null, absent_since: null }
+                    reason: similar
+                    confidence: 0.812
+                    is_low_confidence: false
+                    explanation: { matched: [brand, name], mismatched: [] }
+                    stream_version: 1
+                    proposed_at: "2026-10-01T09:06:30Z"
+                has_next: true
+                has_prev: false
+                next_cursor: "eyJjIjowLjgxMiwibyI6IjAxOTkiLCJzIjoiMDE5OSJ9"
+                prev_cursor: null
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/match-proposals/bulk-confirm-preview:
+    get:
+      tags: [review]
+      summary: Preview a bulk confirm
+      description: |
+        Step 1 of AC-09 (SAD §6 flow 4): for the filter, how many proposals there are, how many have low
+        confidence, and the `(pair, stream_version)` list to send to `bulkConfirmMatchProposals`. The
+        low-confidence threshold lives in code (PRD §8). A filter over 1 000 proposals is refused.
+      operationId: previewBulkConfirm
+      parameters:
+        - $ref: "#/components/parameters/BrandFilter"
+        - $ref: "#/components/parameters/CategoryFilter"
+      responses:
+        "200":
+          description: Preview of the selection.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkConfirmPreview" }
+              example:
+                total: 2
+                low_confidence_count: 1
+                items:
+                  - { own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81, supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3, stream_version: 1 }
+                  - { own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a82, supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a4, stream_version: 3 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/BulkLimitExceeded" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/match-proposals/bulk-confirm:
+    post:
+      tags: [review]
+      summary: Confirm many proposals
+      description: |
+        Step 2 of AC-09: confirms up to 1 000 proposals in one transaction, each with the manager and time
+        in its history. A proposal whose stream moved on (decided by someone else meanwhile) is skipped,
+        not failed (SAD §6 flow 4). p95 ≤ 10 s (PRD §6, `match_proposal.bulk_decide`).
+        Retry-safe through `stream_version`: on a retry, already-confirmed pairs come back as skipped.
+      operationId: bulkConfirmMatchProposals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkConfirmRequest" }
+            example:
+              items:
+                - { own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81, supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3, stream_version: 1 }
+                - { own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a82, supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a4, stream_version: 3 }
+      responses:
+        "200":
+          description: Result counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkConfirmResult" }
+              example:
+                confirmed_count: 1
+                skipped_count: 1
+                skipped:
+                  - { own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a82, supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a4, stream_version: 3 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/match-proposals/{own_product_id}/{supplier_position_id}/confirm:
+    post:
+      tags: [review]
+      summary: Confirm a proposal
+      description: |
+        Appends `ProposalConfirmed` at `stream_version + 1` (AC-08). The pair becomes a match, leaves the
+        queue, and the own product gets this position's price and availability. The decision is remembered
+        with the position fingerprint (US-05). Concurrent decisions: only the first applies, the second
+        gets 409 with who decided (PRD §6, SAD §6 flow 3). p95 ≤ 300 ms (`match_proposal.decide`).
+      operationId: confirmMatchProposal
+      parameters:
+        - $ref: "#/components/parameters/OwnProductId"
+        - $ref: "#/components/parameters/SupplierPositionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+            example: { stream_version: 1 }
+      responses:
+        "200":
+          description: The new match.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Match" }
+              example:
+                own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81
+                supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3
+                origin: confirmed
+                stream_version: 2
+                matched_at: "2026-10-01T10:15:00Z"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ProposalNotFound" }
+        "409": { $ref: "#/components/responses/ProposalAlreadyDecided" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/match-proposals/{own_product_id}/{supplier_position_id}/reject:
+    post:
+      tags: [review]
+      summary: Reject a proposal
+      description: |
+        Appends `ProposalRejected` at `stream_version + 1`. The pair leaves the queue and is not proposed
+        again while the position fingerprint is unchanged (AC-10). Same concurrency rule as confirm.
+      operationId: rejectMatchProposal
+      parameters:
+        - $ref: "#/components/parameters/OwnProductId"
+        - $ref: "#/components/parameters/SupplierPositionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+            example: { stream_version: 1 }
+      responses:
+        "200":
+          description: The remembered decision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RememberedDecision" }
+              example:
+                own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81
+                supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3
+                decision: rejected
+                stream_version: 2
+                decided_at: "2026-10-01T10:15:00Z"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ProposalNotFound" }
+        "409": { $ref: "#/components/responses/ProposalAlreadyDecided" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/matches/{own_product_id}/{supplier_position_id}/cancel:
+    post:
+      tags: [review]
+      summary: Cancel a match
+      description: |
+        Appends `MatchCancelled` at `stream_version + 1` (AC-13, SAD §6 US-06). The position's price and
+        availability are no longer used for the product, the history records who and when, and the pair is
+        remembered as `rejected` with the current fingerprint, so neither cascade (a) nor (b) recreates it
+        (data-model TBD-6). 409 when the stream moved on (another manager, or a new import).
+      operationId: cancelMatch
+      parameters:
+        - $ref: "#/components/parameters/OwnProductId"
+        - $ref: "#/components/parameters/SupplierPositionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+            example: { stream_version: 2 }
+      responses:
+        "200":
+          description: The remembered decision after cancel.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RememberedDecision" }
+              example:
+                own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81
+                supplier_position_id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3
+                decision: rejected
+                stream_version: 3
+                decided_at: "2026-10-02T08:00:00Z"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/MatchNotFound" }
+        "409": { $ref: "#/components/responses/MatchVersionConflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  # ---------------------------------------------------------------- offers
+  /api/v1/coverage:
+    get:
+      tags: [offers]
+      summary: Catalog coverage
+      description: |
+        Share of own products matched with at least one supplier and proposals left (AC-15). Read from the
+        inline projections, so it reflects every decision immediately (ADR-0004). Archived products are
+        excluded.
+      operationId: getCoverage
+      responses:
+        "200":
+          description: Coverage numbers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Coverage" }
+              example:
+                own_products_total: 4000
+                matched_own_products: 3688
+                coverage_ratio: 0.922
+                pending_proposals: 312
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Placeholder. The credential resolves to `RequestContext {shop_id, manager_id}` (SAD §8). The actual
+        scheme (shop token vs basic auth) is an open question owned by Security Lead, due before the pilot
+        (SAD §11, PRD §8).
+
+  parameters:
+    OwnProductId:
+      name: own_product_id
+      in: path
+      required: true
+      description: Own product id (UUID v7).
+      schema: { type: string, format: uuid }
+    SupplierPositionId:
+      name: supplier_position_id
+      in: path
+      required: true
+      description: Supplier position id (UUID v7).
+      schema: { type: string, format: uuid }
+    SupplierId:
+      name: supplier_id
+      in: path
+      required: true
+      description: Supplier id (UUID v7).
+      schema: { type: string, format: uuid }
+    ImportId:
+      name: import_id
+      in: path
+      required: true
+      description: Import id (UUID v7).
+      schema: { type: string, format: uuid }
+    After:
+      name: after
+      in: query
+      required: false
+      description: Opaque cursor from `next_cursor`. Mutually exclusive with `before`.
+      schema: { $ref: "#/components/schemas/Cursor" }
+    Before:
+      name: before
+      in: query
+      required: false
+      description: Opaque cursor from `prev_cursor`. Mutually exclusive with `after`.
+      schema: { $ref: "#/components/schemas/Cursor" }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. The review queue page is 50 (PRD §6).
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    BrandFilter:
+      name: brand
+      in: query
+      required: false
+      description: Exact own-product brand (copied to `match_proposals.brand`).
+      schema: { type: string, maxLength: 200 }
+    CategoryFilter:
+      name: category
+      in: query
+      required: false
+      description: Exact own-product category path (copied to `match_proposals.category`).
+      schema: { type: string, maxLength: 500 }
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Client-generated key (UUID recommended). Stored as `imports.idempotency_key`, unique per shop and
+        kept as long as the import row (no TTL). A repeat with the same key returns the existing import
+        with 200 and does not count against the rate limit.
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Mandatory (SAD §6 US-02: the fetch job retries up to 3 times). Becomes the `request_id` part of the
+        import idempotency key `supplier_id + request_id`, unique per shop and kept with the import row.
+        Must be at most 160 characters so the composed key fits `VARCHAR(200)`.
+      schema: { type: string, minLength: 1, maxLength: 160 }
+
+  headers:
+    RetryAfter:
+      description: Seconds until the hourly upload window frees a slot.
+      schema: { type: integer, minimum: 1 }
+
+  schemas:
+    # ---------- common
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+
+    Cursor:
+      type: string
+      description: Opaque, URL-safe. Encodes the keyset of the list's sort order (UUID v7 id, or confidence + pair for the queue).
+      maxLength: 512
+      pattern: "^[A-Za-z0-9_-]+$"
+
+    Decimal:
+      type: string
+      description: Decimal money value as a string, `NUMERIC(14,4)` — up to 10 integer and 4 fraction digits. Currency and VAT are not modelled (data-model TBD-5).
+      pattern: "^-?\\d{1,10}(\\.\\d{1,4})?$"
+      examples: ["1249.5000"]
+
+    Error:
+      type: object
+      description: RFC 9457 problem details with extension members `code`, `message`, `details`.
+      required: [code, message, status]
+      properties:
+        code:
+          type: string
+          description: "`<module>.<error_name>`. Machine-readable; decides retry vs change the request."
+          pattern: "^[a-z_]+\\.[a-z_]+$"
+          enum:
+            - common.unauthenticated
+            - common.validation_failed
+            - common.internal
+            - own_product.not_found
+            - supplier.not_found
+            - supplier.feed_not_configured
+            - import.not_found
+            - import.file_too_large
+            - import.unsupported_media_type
+            - import.invalid_column_mapping
+            - import.rate_limited
+            - import.not_awaiting_mapping
+            - match_proposal.not_found
+            - match_proposal.already_decided
+            - match_proposal.bulk_limit_exceeded
+            - match.not_found
+            - match.version_conflict
+        message: { type: string, description: "Human-readable, Ukrainian (UI is Ukrainian only, SAD §8)." }
+        status: { type: integer, description: "HTTP status, duplicated per RFC 9457." }
+        details: { type: object, description: Code-specific payload; see the typed `*Error` schemas. }
+
+    ValidationError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            details: { $ref: "#/components/schemas/ValidationDetails" }
+    ValidationDetails:
+      type: object
+      additionalProperties: false
+      required: [fields]
+      properties:
+        fields:
+          type: array
+          items: { $ref: "#/components/schemas/FieldViolation" }
+    FieldViolation:
+      type: object
+      additionalProperties: false
+      required: [field, problem]
+      properties:
+        field: { type: string, description: "JSON pointer-ish path, e.g. `items[3].stream_version`." }
+        problem: { type: string }
+
+    InvalidColumnMappingError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            details: { $ref: "#/components/schemas/InvalidColumnMappingDetails" }
+    InvalidColumnMappingDetails:
+      type: object
+      additionalProperties: false
+      properties:
+        missing_roles:
+          type: array
+          description: Required roles not assigned (`sku`+`name` for a catalog, `name`+`price` for a price; AC-03).
+          items: { $ref: "#/components/schemas/ColumnRole" }
+        duplicate_roles:
+          type: array
+          items: { $ref: "#/components/schemas/ColumnRole" }
+        mapping_required:
+          type: boolean
+          description: True when a price is uploaded without a mapping and the supplier has none remembered.
+
+    RateLimitedError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            details: { $ref: "#/components/schemas/RateLimitDetails" }
+    RateLimitDetails:
+      type: object
+      additionalProperties: false
+      required: [limit, window_seconds]
+      properties:
+        limit: { type: integer, const: 30 }
+        window_seconds: { type: integer, const: 3600 }
+
+    AlreadyDecidedError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            details: { $ref: "#/components/schemas/StreamConflictDetails" }
+    StreamConflictDetails:
+      type: object
+      description: |
+        The current head of the stream. A client that retried its own successful request sees its own
+        manager here and may treat the call as done.
+      additionalProperties: false
+      required: [current_stream_version, last_event_type, decided_at]
+      properties:
+        current_stream_version: { type: integer, minimum: 1 }
+        last_event_type: { $ref: "#/components/schemas/MatchEventType" }
+        decided_by: { $ref: "#/components/schemas/Actor" }
+        decided_at: { type: string, format: date-time }
+
+    BulkLimitExceededError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            details: { $ref: "#/components/schemas/BulkLimitDetails" }
+    BulkLimitDetails:
+      type: object
+      additionalProperties: false
+      required: [total, limit]
+      properties:
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, const: 1000 }
+
+    # ---------- catalog
+    OwnProduct:
+      type: object
+      additionalProperties: false
+      required: [id, sku, name, barcode, manufacturer_code, brand, category, archived_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        sku: { type: string, maxLength: 100, description: Shop's own SKU — upsert key of catalog import. }
+        name: { type: string, maxLength: 500 }
+        barcode: { type: [string, "null"], maxLength: 32, description: "Normalized, digits only." }
+        manufacturer_code: { type: [string, "null"], maxLength: 100, description: "Normalized: upper case, no spaces or dashes." }
+        brand: { type: [string, "null"], maxLength: 200 }
+        category: { type: [string, "null"], maxLength: 500 }
+        archived_at:
+          type: [string, "null"]
+          format: date-time
+          description: Set when the product was missing from a re-uploaded catalog; its matches are kept (data-model TBD-2).
+        created_at: { type: string, format: date-time }
+
+    OwnProductPage:
+      allOf:
+        - $ref: "#/components/schemas/PageInfo"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/OwnProduct" }
+
+    CatalogReadiness:
+      type: object
+      additionalProperties: false
+      required: [own_products_total, without_reliable_code]
+      properties:
+        own_products_total: { type: integer, minimum: 0 }
+        without_reliable_code:
+          type: integer
+          minimum: 0
+          description: Products with neither `barcode` nor `manufacturer_code` — matched only through the queue (AC-01).
+
+    CatalogUpload:
+      type: object
+      required: [file, column_mapping]
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          description: XLSX or CSV, ≤ 50 MB.
+        column_mapping: { $ref: "#/components/schemas/ColumnMapping" }
+
+    # ---------- suppliers
+    SupplierRef:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+
+    Supplier:
+      type: object
+      additionalProperties: false
+      required: [id, name, feed_url, column_mapping, price_date, is_price_stale, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        feed_url: { type: [string, "null"], format: uri }
+        column_mapping:
+          description: Remembered mapping (AC-02); null until the first price is applied.
+          oneOf:
+            - $ref: "#/components/schemas/ColumnMapping"
+            - type: "null"
+        price_date:
+          type: [string, "null"]
+          format: date-time
+          description: Date of the price in force; null before the first applied price.
+        is_price_stale:
+          type: boolean
+          description: "`price_date` older than 7 days (AC-18). Threshold is global for the pilot (PRD §8)."
+        created_at: { type: string, format: date-time }
+
+    SupplierCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        feed_url:
+          type: [string, "null"]
+          format: uri
+          pattern: "^https?://"
+          description: Public http(s) URL only (PRD §6.1).
+
+    SupplierPage:
+      allOf:
+        - $ref: "#/components/schemas/PageInfo"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/Supplier" }
+
+    SupplierPosition:
+      type: object
+      additionalProperties: false
+      required: [id, supplier, supplier_code, name, barcode, manufacturer_code, brand, price, in_stock, stock_quantity, absent_since]
+      properties:
+        id: { type: string, format: uuid }
+        supplier: { $ref: "#/components/schemas/SupplierRef" }
+        supplier_code: { type: [string, "null"], maxLength: 100 }
+        name: { type: string, maxLength: 500 }
+        barcode: { type: [string, "null"], maxLength: 32 }
+        manufacturer_code: { type: [string, "null"], maxLength: 100 }
+        brand: { type: [string, "null"], maxLength: 200 }
+        price: { $ref: "#/components/schemas/Decimal" }
+        in_stock: { type: [boolean, "null"], description: Availability flag if the price has one (data-model TBD-5). }
+        stock_quantity: { type: [integer, "null"], description: Quantity if the supplier gives it (data-model TBD-5). }
+        absent_since:
+          type: [string, "null"]
+          format: date-time
+          description: The position is missing from the latest price (AC-17).
+
+    FeedFetchAccepted:
+      type: object
+      additionalProperties: false
+      required: [supplier_id, idempotency_key]
+      properties:
+        supplier_id: { type: string, format: uuid }
+        idempotency_key: { type: string, maxLength: 160, description: Echo of the request header. }
+
+    PriceUpload:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          description: XLSX or CSV, ≤ 50 MB, ≤ 100 000 rows.
+        column_mapping:
+          $ref: "#/components/schemas/ColumnMapping"
+
+    # ---------- imports
+    ColumnRole:
+      type: string
+      description: |
+        Target field of a column. Catalog: `sku`, `name`, `barcode`, `manufacturer_code`, `brand`,
+        `category`. Price: `supplier_code`, `name`, `barcode`, `manufacturer_code`, `brand`, `price`,
+        `in_stock`, `stock_quantity`.
+      enum: [sku, name, barcode, manufacturer_code, brand, category, supplier_code, price, in_stock, stock_quantity]
+
+    ColumnMapping:
+      type: object
+      description: |
+        Headers of the file in order, each with its role or null (ignored). Order matters: AC-04 compares
+        both the set and the order of headers. Stored as JSONB `suppliers.column_mapping` /
+        `imports.column_mapping`.
+      additionalProperties: false
+      required: [columns]
+      properties:
+        columns:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: "#/components/schemas/ColumnMappingEntry" }
+    ColumnMappingEntry:
+      type: object
+      additionalProperties: false
+      required: [header, role]
+      properties:
+        header: { type: string, maxLength: 200 }
+        role:
+          oneOf:
+            - $ref: "#/components/schemas/ColumnRole"
+            - type: "null"
+
+    ColumnMappingConfirmation:
+      type: object
+      additionalProperties: false
+      required: [column_mapping]
+      properties:
+        column_mapping: { $ref: "#/components/schemas/ColumnMapping" }
+
+    ImportKind:
+      type: string
+      enum: [catalog, price]
+    ImportSource:
+      type: string
+      enum: [upload, feed]
+    ImportStatus:
+      type: string
+      description: "`queued` → `processing` → `applied` | `rejected` | `awaiting_mapping` (SAD §6 flows 1, 2)."
+      enum: [queued, processing, applied, rejected, awaiting_mapping]
+
+    Import:
+      type: object
+      additionalProperties: false
+      required: [id, kind, source, status, supplier_id, uploaded_by, original_filename, column_mapping, issues, rows_recognized, auto_matched_count, proposals_count, created_at, started_at, finished_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/ImportKind" }
+        source: { $ref: "#/components/schemas/ImportSource" }
+        status: { $ref: "#/components/schemas/ImportStatus" }
+        supplier_id: { type: [string, "null"], format: uuid, description: Null for `kind = catalog`. }
+        uploaded_by: { $ref: "#/components/schemas/Actor" }
+        original_filename: { type: [string, "null"], maxLength: 255 }
+        column_mapping:
+          description: The mapping this file was parsed with.
+          oneOf:
+            - $ref: "#/components/schemas/ColumnMapping"
+            - type: "null"
+        issues:
+          description: Present for `rejected` and `awaiting_mapping`.
+          oneOf:
+            - $ref: "#/components/schemas/ImportIssues"
+            - type: "null"
+        rows_recognized: { type: [integer, "null"], minimum: 0, description: '"N позицій розпізнано" (AC-02).' }
+        auto_matched_count: { type: [integer, "null"], minimum: 0 }
+        proposals_count: { type: [integer, "null"], minimum: 0 }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+
+    ImportIssues:
+      type: object
+      description: Why the import was not applied. The previous price / catalog stays in force (AC-03, AC-04).
+      additionalProperties: false
+      properties:
+        missing_roles:
+          type: array
+          description: Required columns not mapped (AC-03).
+          items: { $ref: "#/components/schemas/ColumnRole" }
+        invalid_cells:
+          type: array
+          description: Invalid values, truncated to the first 100 (AC-03).
+          maxItems: 100
+          items: { $ref: "#/components/schemas/InvalidCell" }
+        invalid_cells_total: { type: integer, minimum: 0 }
+        column_diff: { $ref: "#/components/schemas/ColumnDiff" }
+        rejection_reason:
+          type: string
+          description: File-level or feed-level reason (PRD §6.1, SAD §6 US-02).
+          enum: [too_many_rows, unpacked_size_limit, unreadable_file, feed_blocked_address, feed_size_limit]
+    InvalidCell:
+      type: object
+      additionalProperties: false
+      required: [row, header, role, problem]
+      properties:
+        row: { type: integer, minimum: 1, description: 1-based row number in the file. }
+        header: { type: string, maxLength: 200 }
+        role: { $ref: "#/components/schemas/ColumnRole" }
+        problem: { type: string, enum: [not_a_number, empty_required] }
+    ColumnDiff:
+      type: object
+      description: Remembered vs received headers (AC-04).
+      additionalProperties: false
+      required: [remembered_headers, received_headers]
+      properties:
+        remembered_headers: { type: array, items: { type: string, maxLength: 200 } }
+        received_headers: { type: array, items: { type: string, maxLength: 200 } }
+
+    ImportPage:
+      allOf:
+        - $ref: "#/components/schemas/PageInfo"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/Import" }
+
+    # ---------- review / ledger
+    Actor:
+      type: object
+      description: Who did it. `system` = automatic matching or a scheduled feed (`manager_id IS NULL`).
+      additionalProperties: false
+      required: [kind, manager_id, display_name]
+      properties:
+        kind: { type: string, enum: [system, manager] }
+        manager_id: { type: [string, "null"], format: uuid }
+        display_name: { type: [string, "null"], maxLength: 200 }
+
+    StreamRef:
+      type: object
+      description: A ledger stream (pair) with the version the client saw.
+      additionalProperties: false
+      required: [own_product_id, supplier_position_id, stream_version]
+      properties:
+        own_product_id: { type: string, format: uuid }
+        supplier_position_id: { type: string, format: uuid }
+        stream_version: { type: integer, minimum: 1 }
+
+    DecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [stream_version]
+      properties:
+        stream_version: { type: integer, minimum: 1, description: Version of the stream the manager saw. }
+
+    ProposalReason:
+      type: string
+      description: "`ambiguous_code` (AC-07), `similar` (AC-06), `fingerprint_changed` (AC-11)."
+      enum: [ambiguous_code, similar, fingerprint_changed]
+
+    Feature:
+      type: string
+      description: A feature compared between own product and supplier position.
+      enum: [barcode, manufacturer_code, supplier_code, name, brand]
+
+    ProposalExplanation:
+      type: object
+      description: Why the pair looks alike (AC-08), why the code is ambiguous (AC-07), what changed (AC-11).
+      additionalProperties: false
+      required: [matched, mismatched]
+      properties:
+        matched: { type: array, items: { $ref: "#/components/schemas/Feature" } }
+        mismatched: { type: array, items: { $ref: "#/components/schemas/Feature" } }
+        changed:
+          type: array
+          description: Fingerprint parts that changed since the remembered decision (AC-11).
+          items: { $ref: "#/components/schemas/Feature" }
+        ambiguous_code: { $ref: "#/components/schemas/AmbiguousCode" }
+    AmbiguousCode:
+      type: object
+      additionalProperties: false
+      required: [kind, value, candidate_count]
+      properties:
+        kind: { type: string, enum: [barcode, manufacturer_code] }
+        value: { type: string, maxLength: 100 }
+        candidate_count: { type: integer, minimum: 2 }
+
+    MatchProposal:
+      type: object
+      additionalProperties: false
+      required: [own_product, supplier_position, reason, confidence, is_low_confidence, explanation, stream_version, proposed_at]
+      properties:
+        own_product: { $ref: "#/components/schemas/OwnProduct" }
+        supplier_position: { $ref: "#/components/schemas/SupplierPosition" }
+        reason: { $ref: "#/components/schemas/ProposalReason" }
+        confidence: { type: number, minimum: 0, maximum: 1, description: "`NUMERIC(4,3)`, three decimals." }
+        is_low_confidence: { type: boolean, description: Below the code-level threshold used by the AC-09 warning (PRD §8). }
+        explanation: { $ref: "#/components/schemas/ProposalExplanation" }
+        stream_version: { type: integer, minimum: 1 }
+        proposed_at: { type: string, format: date-time }
+
+    MatchProposalPage:
+      allOf:
+        - $ref: "#/components/schemas/PageInfo"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/MatchProposal" }
+
+    BulkConfirmPreview:
+      type: object
+      additionalProperties: false
+      required: [total, low_confidence_count, items]
+      properties:
+        total: { type: integer, minimum: 0, maximum: 1000 }
+        low_confidence_count: { type: integer, minimum: 0 }
+        items:
+          type: array
+          maxItems: 1000
+          items: { $ref: "#/components/schemas/StreamRef" }
+
+    BulkConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: "#/components/schemas/StreamRef" }
+
+    BulkConfirmResult:
+      type: object
+      additionalProperties: false
+      required: [confirmed_count, skipped_count, skipped]
+      properties:
+        confirmed_count: { type: integer, minimum: 0 }
+        skipped_count: { type: integer, minimum: 0 }
+        skipped:
+          type: array
+          description: Pairs decided by someone else meanwhile (stale `stream_version`).
+          items: { $ref: "#/components/schemas/StreamRef" }
+
+    MatchOrigin:
+      type: string
+      description: "`auto_code` (AC-05), `auto_remembered` (AC-10), `confirmed` (AC-08)."
+      enum: [auto_code, auto_remembered, confirmed]
+
+    Match:
+      type: object
+      additionalProperties: false
+      required: [own_product_id, supplier_position_id, origin, stream_version, matched_at]
+      properties:
+        own_product_id: { type: string, format: uuid }
+        supplier_position_id: { type: string, format: uuid }
+        origin: { $ref: "#/components/schemas/MatchOrigin" }
+        stream_version: { type: integer, minimum: 1 }
+        matched_at: { type: string, format: date-time }
+
+    RememberedDecision:
+      type: object
+      additionalProperties: false
+      required: [own_product_id, supplier_position_id, decision, stream_version, decided_at]
+      properties:
+        own_product_id: { type: string, format: uuid }
+        supplier_position_id: { type: string, format: uuid }
+        decision: { type: string, enum: [confirmed, rejected] }
+        stream_version: { type: integer, minimum: 1 }
+        decided_at: { type: string, format: date-time }
+
+    MatchEventType:
+      type: string
+      description: Ledger event types (ADR-0004). New types are an additive change with a minor version bump.
+      enum: [AutoMatched, ProposalCreated, ProposalConfirmed, ProposalRejected, MatchCancelled, ReturnedToQueue]
+
+    MatchEventExplanation:
+      type: object
+      description: Explanation part of the event payload — matched code, changed fingerprint parts, confidence.
+      additionalProperties: false
+      properties:
+        matched_code:
+          type: object
+          description: Which reliable code created an automatic match (AC-05).
+          additionalProperties: false
+          required: [kind, value]
+          properties:
+            kind: { type: string, enum: [barcode, manufacturer_code] }
+            value: { type: string, maxLength: 100 }
+        remembered: { type: boolean, description: 'Applied from a remembered decision — "раніше підтверджено менеджером" (AC-10).' }
+        changed:
+          type: array
+          items: { $ref: "#/components/schemas/Feature" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+
+    MatchEvent:
+      type: object
+      additionalProperties: false
+      required: [id, type, supplier_position, stream_version, actor, import_id, explanation, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/MatchEventType" }
+        supplier_position: { $ref: "#/components/schemas/SupplierPosition" }
+        stream_version: { type: integer, minimum: 1 }
+        actor: { $ref: "#/components/schemas/Actor" }
+        import_id: { type: [string, "null"], format: uuid, description: Import that caused the event; null for manager decisions. }
+        explanation: { $ref: "#/components/schemas/MatchEventExplanation" }
+        occurred_at: { type: string, format: date-time }
+
+    MatchHistory:
+      type: object
+      additionalProperties: false
+      required: [own_product_id, events]
+      properties:
+        own_product_id: { type: string, format: uuid }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/MatchEvent" }
+
+    # ---------- offers
+    Offer:
+      type: object
+      description: Purchase price and availability from a matched position (CONTEXT invariant).
+      additionalProperties: false
+      required: [supplier_position, match_origin, matched_at, price_date, is_price_stale, absent_in_latest_price, stream_version]
+      properties:
+        supplier_position: { $ref: "#/components/schemas/SupplierPosition" }
+        match_origin: { $ref: "#/components/schemas/MatchOrigin" }
+        matched_at: { type: string, format: date-time }
+        price_date: { type: [string, "null"], format: date-time, description: The supplier's `price_date`. }
+        is_price_stale: { type: boolean, description: Price older than 7 days (AC-18). }
+        absent_in_latest_price: { type: boolean, description: '"Відсутня в останньому прайсі" — `absent_since` is set (AC-17).' }
+        stream_version: { type: integer, minimum: 1, description: Needed to cancel this match. }
+
+    Candidate:
+      type: object
+      description: An unconfirmed proposal. Its price is never a purchase price (AC-16).
+      additionalProperties: false
+      required: [supplier_position, confirmed, reason, confidence, stream_version]
+      properties:
+        supplier_position: { $ref: "#/components/schemas/SupplierPosition" }
+        confirmed: { type: boolean, const: false }
+        reason: { $ref: "#/components/schemas/ProposalReason" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        stream_version: { type: integer, minimum: 1 }
+
+    OwnProductOffers:
+      type: object
+      additionalProperties: false
+      required: [own_product, offers, candidates]
+      properties:
+        own_product: { $ref: "#/components/schemas/OwnProduct" }
+        offers:
+          type: array
+          items: { $ref: "#/components/schemas/Offer" }
+        candidates:
+          type: array
+          items: { $ref: "#/components/schemas/Candidate" }
+
+    Coverage:
+      type: object
+      additionalProperties: false
+      required: [own_products_total, matched_own_products, coverage_ratio, pending_proposals]
+      properties:
+        own_products_total: { type: integer, minimum: 0 }
+        matched_own_products: { type: integer, minimum: 0, description: With at least one match (any supplier). }
+        coverage_ratio: { type: number, minimum: 0, maximum: 1 }
+        pending_proposals: { type: integer, minimum: 0, description: Rows in the review queue. }
+
+    # ---------- pagination
+    PageInfo:
+      type: object
+      required: [has_next, has_prev, next_cursor, prev_cursor]
+      properties:
+        has_next: { type: boolean }
+        has_prev: { type: boolean }
+        next_cursor:
+          oneOf:
+            - $ref: "#/components/schemas/Cursor"
+            - type: "null"
+        prev_cursor:
+          oneOf:
+            - $ref: "#/components/schemas/Cursor"
+            - type: "null"
+
+  responses:
+    Unauthenticated:
+      description: Missing or invalid credential.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: common.unauthenticated, message: "Потрібна автентифікація.", status: 401 }
+    ValidationFailed:
+      description: Request does not match the schema (SAD §8 → 422).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ValidationError" }
+          example:
+            code: common.validation_failed
+            message: "Запит містить некоректні поля."
+            status: 422
+            details: { fields: [{ field: stream_version, problem: "must be an integer ≥ 1" }] }
+    Internal:
+      description: Unexpected server error. Safe to retry reads; for writes, retry with the same `stream_version` / `Idempotency-Key`.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: common.internal, message: "Внутрішня помилка. Спробуйте ще раз.", status: 500 }
+    OwnProductNotFound:
+      description: No such own product in this shop (also for another shop's id — AC-12).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: own_product.not_found, message: "Товар не знайдено.", status: 404 }
+    SupplierNotFound:
+      description: No such supplier in this shop.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: supplier.not_found, message: "Постачальника не знайдено.", status: 404 }
+    FeedNotConfigured:
+      description: The supplier has no `feed_url` or no remembered column mapping yet (US-02 feed precondition).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: supplier.feed_not_configured, message: "Для постачальника не налаштовано фід або схему колонок.", status: 409 }
+    ImportNotFound:
+      description: No such import in this shop.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: import.not_found, message: "Імпорт не знайдено.", status: 404 }
+    ImportNotAwaitingMapping:
+      description: The import is not in `awaiting_mapping`.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: import.not_awaiting_mapping, message: "Імпорт не очікує підтвердження розмітки.", status: 409 }
+    FileTooLarge:
+      description: File over 50 MB (PRD §6.1, SAD §8).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: import.file_too_large, message: "Файл більший за 50 МБ.", status: 413 }
+    UnsupportedMediaType:
+      description: Not XLSX or CSV.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: import.unsupported_media_type, message: "Підтримуються лише XLSX і CSV.", status: 415 }
+    InvalidColumnMapping:
+      description: Required roles not mapped, or no mapping for a supplier without a remembered one (AC-03).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/InvalidColumnMappingError" }
+          example:
+            code: import.invalid_column_mapping
+            message: "Не вказано колонку ціни."
+            status: 422
+            details: { missing_roles: [price] }
+    RateLimited:
+      description: More than 30 uploads per shop in the last hour (PRD §6.1).
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/RateLimitedError" }
+          example:
+            code: import.rate_limited
+            message: "Перевищено ліміт 30 завантажень на годину."
+            status: 429
+            details: { limit: 30, window_seconds: 3600 }
+    ProposalNotFound:
+      description: The pair has never been proposed in this shop.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: match_proposal.not_found, message: "Пропозицію не знайдено.", status: 404 }
+    ProposalAlreadyDecided:
+      description: The stream moved past `stream_version` — someone decided first (PRD §6, SAD §6 flow 3).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/AlreadyDecidedError" }
+          example:
+            code: match_proposal.already_decided
+            message: "Пропозицію вже вирішено."
+            status: 409
+            details:
+              current_stream_version: 2
+              last_event_type: ProposalConfirmed
+              decided_by: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+              decided_at: "2026-10-01T10:14:58Z"
+    BulkLimitExceeded:
+      description: The filter selects more than 1 000 proposals (PRD §6) — narrow it.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/BulkLimitExceededError" }
+          example:
+            code: match_proposal.bulk_limit_exceeded
+            message: "Фільтр охоплює понад 1000 пропозицій. Звузьте його."
+            status: 422
+            details: { total: 1840, limit: 1000 }
+    MatchNotFound:
+      description: No current match for this pair in this shop (SAD §6 US-06).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: match.not_found, message: "Зіставлення не знайдено.", status: 404 }
+    MatchVersionConflict:
+      description: The stream changed — another manager or a new import (SAD §6 US-06).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/AlreadyDecidedError" }
+          example:
+            code: match.version_conflict
+            message: "Стан змінився, оновіть сторінку."
+            status: 409
+            details:
+              current_stream_version: 3
+              last_event_type: ReturnedToQueue
+              decided_by: { kind: system, manager_id: null, display_name: null }
+              decided_at: "2026-10-02T03:10:00Z"
+
+  examples:
+    Supplier:
+      value:
+        id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+        name: "Test Supplier"
+        feed_url: "https://feeds.example.test/price.xlsx"
+        column_mapping:
+          columns:
+            - { header: "Код", role: supplier_code }
+            - { header: "Найменування", role: name }
+            - { header: "EAN", role: barcode }
+            - { header: "Ціна", role: price }
+        price_date: "2026-09-22T06:00:00Z"
+        is_price_stale: true
+        created_at: "2026-09-20T09:00:00Z"
+    SupplierNew:
+      value:
+        id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+        name: "Test Supplier"
+        feed_url: "https://feeds.example.test/price.xlsx"
+        column_mapping: null
+        price_date: null
+        is_price_stale: false
+        created_at: "2026-10-01T08:30:00Z"
+    CatalogImportQueued:
+      value:
+        id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b5
+        kind: catalog
+        source: upload
+        status: queued
+        supplier_id: null
+        uploaded_by: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+        original_filename: "catalog.xlsx"
+        column_mapping:
+          columns:
+            - { header: "Артикул", role: sku }
+            - { header: "Назва", role: name }
+        issues: null
+        rows_recognized: null
+        auto_matched_count: null
+        proposals_count: null
+        created_at: "2026-10-01T08:05:00Z"
+        started_at: null
+        finished_at: null
+    PriceImportQueued:
+      value:
+        id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b4
+        kind: price
+        source: upload
+        status: queued
+        supplier_id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+        uploaded_by: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+        original_filename: "price-2026-10-01.xlsx"
+        column_mapping: null
+        issues: null
+        rows_recognized: null
+        auto_matched_count: null
+        proposals_count: null
+        created_at: "2026-10-01T09:00:00Z"
+        started_at: null
+        finished_at: null
+    PriceImportApplied:
+      value:
+        id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b4
+        kind: price
+        source: upload
+        status: applied
+        supplier_id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+        uploaded_by: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+        original_filename: "price-2026-10-01.xlsx"
+        column_mapping:
+          columns:
+            - { header: "Код", role: supplier_code }
+            - { header: "Найменування", role: name }
+            - { header: "EAN", role: barcode }
+            - { header: "Ціна", role: price }
+        issues: null
+        rows_recognized: 48210
+        auto_matched_count: 31877
+        proposals_count: 2904
+        created_at: "2026-10-01T09:00:00Z"
+        started_at: "2026-10-01T09:00:02Z"
+        finished_at: "2026-10-01T09:06:41Z"
+    PriceImportRejected:
+      value:
+        id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b6
+        kind: price
+        source: upload
+        status: rejected
+        supplier_id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+        uploaded_by: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+        original_filename: "price-broken.csv"
+        column_mapping:
+          columns:
+            - { header: "Код", role: supplier_code }
+            - { header: "Найменування", role: name }
+            - { header: "Ціна", role: price }
+        issues:
+          invalid_cells:
+            - { row: 17, header: "Ціна", role: price, problem: not_a_number }
+            - { row: 18, header: "Ціна", role: price, problem: not_a_number }
+          invalid_cells_total: 2
+        rows_recognized: null
+        auto_matched_count: null
+        proposals_count: null
+        created_at: "2026-10-01T09:20:00Z"
+        started_at: "2026-10-01T09:20:01Z"
+        finished_at: "2026-10-01T09:20:09Z"
+    PriceImportAwaitingMapping:
+      value:
+        id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b7
+        kind: price
+        source: feed
+        status: awaiting_mapping
+        supplier_id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
+        uploaded_by: { kind: system, manager_id: null, display_name: null }
+        original_filename: "price.xlsx"
+        column_mapping: null
+        issues:
+          column_diff:
+            remembered_headers: ["Код", "Найменування", "EAN", "Ціна"]
+            received_headers: ["Код", "Найменування", "Ціна, грн", "EAN"]
+        rows_recognized: null
+        auto_matched_count: null
+        proposals_count: null
+        created_at: "2026-10-02T03:00:00Z"
+        started_at: "2026-10-02T03:00:04Z"
+        finished_at: "2026-10-02T03:00:30Z"
+    OwnProductOffers:
+      value:
+        own_product:
+          id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81
+          sku: SKU-0001
+          name: "Test Product 1, 500 мл"
+          barcode: "4820000000017"
+          manufacturer_code: "TP-500"
+          brand: "Test Brand"
+          category: "Побутова хімія / Миття"
+          archived_at: null
+          created_at: "2026-10-01T08:00:00Z"
+        offers:
+          - supplier_position:
+              id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3
+              supplier: { id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192, name: "Test Supplier" }
+              supplier_code: "SUP-1"
+              name: "TEST PRODUCT 1 0.5L"
+              barcode: "4820000000017"
+              manufacturer_code: null
+              brand: "Test Brand"
+              price: "84.5000"
+              in_stock: null
+              stock_quantity: null
+              absent_since: "2026-09-29T06:00:00Z"
+            match_origin: auto_code
+            matched_at: "2026-09-20T09:10:00Z"
+            price_date: "2026-09-22T06:00:00Z"
+            is_price_stale: true
+            absent_in_latest_price: true
+            stream_version: 1
+        candidates:
+          - supplier_position:
+              id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a5
+              supplier: { id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708193, name: "Test Supplier 2" }
+              supplier_code: "B-77"
+              name: "Test Product 1 500ml"
+              barcode: null
+              manufacturer_code: null
+              brand: "Test Brand"
+              price: "79.9000"
+              in_stock: true
+              stock_quantity: 12
+              absent_since: null
+            confirmed: false
+            reason: similar
+            confidence: 0.640
+            stream_version: 1
+    MatchHistory:
+      value:
+        own_product_id: 0199a3c1-2b4d-7a10-9f21-3e4d5c6b7a81
+        events:
+          - id: 0199a3c3-7e8f-7f60-8075-8192a3b4c5d6
+            type: AutoMatched
+            supplier_position:
+              id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3
+              supplier: { id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192, name: "Test Supplier" }
+              supplier_code: "SUP-1"
+              name: "TEST PRODUCT 1 0.5L"
+              barcode: "4820000000017"
+              manufacturer_code: null
+              brand: "Test Brand"
+              price: "84.5000"
+              in_stock: true
+              stock_quantity: null
+              absent_since: null
+            stream_version: 1
+            actor: { kind: system, manager_id: null, display_name: null }
+            import_id: 0199a3c2-4c5d-7d40-ae53-6f708192a3b4
+            explanation: { matched_code: { kind: barcode, value: "4820000000017" } }
+            occurred_at: "2026-10-01T09:05:12Z"
+          - id: 0199a3c3-9a0b-7f61-8176-8192a3b4c5d7
+            type: MatchCancelled
+            supplier_position:
+              id: 0199a3c2-0a1b-7c30-9d42-5e6f708192a3
+              supplier: { id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192, name: "Test Supplier" }
+              supplier_code: "SUP-1"
+              name: "TEST PRODUCT 1 0.5L"
+              barcode: "4820000000017"
+              manufacturer_code: null
+              brand: "Test Brand"
+              price: "84.5000"
+              in_stock: true
+              stock_quantity: null
+              absent_since: null
+            stream_version: 2
+            actor: { kind: manager, manager_id: 0199a3c0-1a2b-7e50-bf64-708192a3b4c5, display_name: "Test User" }
+            import_id: null
+            explanation: {}
+            occurred_at: "2026-10-01T11:40:00Z"
