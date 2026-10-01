@@ -250,24 +250,41 @@ sequenceDiagram
 
 ## 7. Deployment view
 
-<!-- 🎯 Навіщо: ТОПОЛОГІЯ, яку DevOps має знати без читання Helm-чартів — скільки реплік,  -->
-<!--           де живе фоновий обробник, ПРИ ЯКИХ ЧИСЛАХ масштабуємось.                     -->
-<!-- 📋 Що писати: 2-3 речення про топологію + метрики + алерти + конкретні числа-пороги.   -->
-<!-- 📌 Приклад: «500 IC → партиціонування за кварталом» (не «при зростанні подумаємо»).    -->
-<!-- 🎯 Можна N/A для XS/S функцій, що переюзають існуюче розгортання без змін.            -->
+Одна VM з Docker Compose за формою `price-infrastructure` (s-price): `caddy` (TLS + SPA + reverse proxy), `api` ×1, `worker` ×1, `postgres` 18.4, одноразовий `migrate` (TypeORM migrations перед стартом `api`/`worker`) і `backup` (щоденний `pg_dump` поза VM — в окремий bucket того ж провайдера, що й ADR-0006). Оригінали файлів — у керованому bucket ЄС (ADR-0006). Availability 99.5% за місяць (PRD §6) ≈ 3.6 год простою — одна VM це покриває; деплой — `docker compose up` з коротким простоєм `api`, незавершені задачі `worker` pg-boss повторює після рестарту.
 
-<Topology in 2-3 sentences. Where it runs (k8s / VM / serverless), replicas, scaling thresholds.>
+```mermaid
+flowchart TB
+    subgraph vm[VM — Docker Compose]
+        caddy[caddy 2.10]
+        api[api ×1 — NestJS]
+        worker[worker ×1 — NestJS + pg-boss]
+        pg[(postgres 18.4)]
+        backup[backup — pg_dump щодоби]
+    end
+    s3[(Object storage ЄС — uploads, 30 днів)]
+    s3b[(Object storage ЄС — backups)]
+    feed[Фід постачальника]
+    caddy --> api
+    api --> pg
+    worker --> pg
+    api --> s3
+    worker --> s3
+    worker --> feed
+    backup --> pg
+    backup --> s3b
+```
 
-**Monitoring:**
-- <Metrics — e.g. Prometheus `<metric_name>`>
-- <Alerts — e.g. "outbox lag > 10 min → page on-call">
-- <Tracing — e.g. OpenTelemetry HTTP spans>
+**Monitoring** (інструмент — Open question у §11; тут — що має існувати незалежно від інструменту):
+- Метрики з PRD §6: `price_import.processing_duration`, `match_queue.list`, `match_proposal.decide`, `match_proposal.bulk_decide` (латентність, p95).
+- Алерти: імпорт у статусі `queued`/`processing` довше 15 хв; задача pg-boss вичерпала повтори; фід постачальника не забрався 2 доби поспіль; недоступність `/health` (для 99.5%).
+- Логи: структуровані JSON-логи `api` і `worker` у docker (див. §8).
 
 **Scaling thresholds:**
-- <e.g. 500 IC × 5 goals × 26 checkpoints/Q = 65k rows/year — comfortable in one table>
-- <e.g. partitioning by quarter at >500k rows/year>
-
-<!-- For XS/S that doesn't change deployment: <!-- N/A: feature reuses existing deployment unit -->. -->
+- p95 імпорту > 8 хв (80% бюджету 10 хв) → підняти concurrency `worker`, далі — друга репліка `worker` (pg-boss це дозволяє без змін коду).
+- `api` стабільно CPU > 70% або < 20 req/s на інстанс (PRD §6) → друга репліка `api` за Caddy.
+- `supplier_position`: ≈ 1 млн рядків на магазин (10 постачальників × 100 000) — 3 пілотні магазини ≈ 3 млн, комфортно в одній таблиці; партиціонування за `shop_id` від 30 магазинів (≈ 30 млн).
+- `match_event`: подія лише при зміні стану пари (ADR-0004); партиціонування за місяцем після 50 млн рядків.
+- pg-boss: виконані задачі зберігаються 7 днів.
 
 ## 8. Crosscutting concepts
 
@@ -333,6 +350,7 @@ Each top-3 goal from §1 expanded into a full scenario:
 | Risk / debt | Severity | Mitigation | Owner |
 |---|---|---|---|
 | Open architectural decision: механізм пошуку кандидатів за схожістю (стадія (c) каскаду, §4.2) | Open question | Resolve before 2026-10-15; «Порівняти варіанти спайком: pg_trgm, пошук у пам'яті worker, ембедінги — за точністю і часом, перш ніж фіксувати» | gene.bilyy@gmail.com |
+| Open architectural decision: стек спостережуваності — метрики, помилки, алерти (§7 Monitoring) | Open question | Resolve before старт пілоту; «Спершу ядро, моніторинг пізніше: до пілоту фокус на ядрі зіставлення; інструмент моніторингу виберемо перед стартом пілоту» | gene.bilyy@gmail.com |
 
 ## 12. Glossary
 
