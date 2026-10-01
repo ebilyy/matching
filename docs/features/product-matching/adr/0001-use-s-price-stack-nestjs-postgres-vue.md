@@ -27,13 +27,13 @@ product-matching — окремий застосунок, що будуєтьс�
 
 ## Considered options
 
-1. **Стек s-price** — TypeScript/Node 24 + NestJS 11 + TypeORM + Postgres 18.4 + Vue 3 SPA; розбір прайсів на Node (exceljs streaming, csv-parse), пошук схожих — у Postgres.
+1. **Стек s-price** — TypeScript/Node 24 + NestJS 11 + TypeORM + Postgres 18.4 + Vue 3 SPA; розбір прайсів на Node (exceljs streaming, csv-parse); механізм пошуку схожих визначить спайк (SAD §11).
 2. **s-price + Python-воркер** — API/UI на NestJS, розбір і фаззі-підбір в окремому Python-сервісі (pandas/openpyxl + rapidfuzz) над тією ж Postgres.
 3. **Весь бекенд на Python** — FastAPI + SQLAlchemy + Postgres 18.4, фронт Vue 3.
 
 ## Decision outcome
 
-**Chosen:** Option 1 — стек s-price. Нуль часу на вивчення й налаштування, копіюється форма модулів і compose-файлів s-price; слабшу екосистему Node для «брудних» таблиць компенсуємо тим, що важкі операції (пошук схожих, масові вставки) виконує Postgres, а не застосунок.
+**Chosen:** Option 1 — стек s-price. Нуль часу на вивчення й налаштування, копіюється форма модулів і compose-файлів s-price; слабшу екосистему Node для «брудних» таблиць компенсуємо тим, що масові вставки й set-based операції виконує Postgres; механізм пошуку схожих визначить спайк (SAD §11 Open question, due 2026-10-15).
 
 ## Consequences
 
