@@ -288,22 +288,19 @@ flowchart TB
 
 ## 8. Crosscutting concepts
 
-<!-- 🎯 Навіщо: НАСКРІЗНІ ПАТЕРНИ, які перетинають кілька модулів: логування, помилки,    -->
-<!--           авторизація, ID strategy, outbox, кеш. ⭐ Друга найгустіша секція.          -->
-<!--           Якщо патерн всередині одного модуля — він НЕ сюди. Якщо це конвенція        -->
-<!--           проєкту в цілому — у CLAUDE.md.                                              -->
-<!-- 📋 Що писати: таблиця концепт / конвенція / де визначено. Один рядок на концепт.      -->
-<!-- 📌 Приклад: «UUID v7 (час+випадковий, сортується) у app-layer» — як default з CLAUDE.md. -->
-
 | Concept | Convention | Where defined |
 |---|---|---|
-| Logging | <e.g. structured slog, fields `module=<name>`> | <CLAUDE.md §X or here> |
-| Authentication | <e.g. JWT via session middleware> | <CLAUDE.md §X> |
-| Error handling | <e.g. domain sentinel → ports/errors.go → apperr JSON> | <CLAUDE.md §X> |
-| ID strategy | <e.g. UUID v7 in app layer> | <CLAUDE.md §X> |
-| Internationalisation | <e.g. N/A, English only> | — |
-| Observability | <e.g. OpenTelemetry on HTTP boundaries> | — |
-| Outbox / events | <module-specific patterns, if any> | <here> |
+| Multi-tenancy (ізоляція магазинів) | `shop_id` у кожній таблиці; складені зовнішні ключі `(shop_id, id)`; базовий репозиторій бере `shop_id` з RequestContext і додає фільтр сам; сирий SQL (каскад, проєкції) — лише через хелпер, що вимагає `shop_id`; інтеграційний тест AC-12 на кожен ендпоінт і задачу | ADR-0008 |
+| Request context | Кожен HTTP-запит і кожна задача pg-boss несе `RequestContext {shop_id, manager_id}` (AsyncLocalStorage); `manager_id` пишеться в кожну подію `match_event` (AC-14). **Джерело контексту (ідентифікація магазину й менеджера без автентифікації) — Open question у §11** | тут + §11 |
+| Logging | `nestjs-pino`, JSON; поля `shop_id`, `request_id`, `job_id`; **ніколи** вміст комірок прайсів і ціни | тут |
+| Error handling | доменні помилки → exception filter → RFC 9457 `problem+json`; конфлікт версії потоку → 409; помилка валідації → 422 | тут (конвенція schemka-backend) |
+| ID strategy | UUID v7, генерується в app-шарі | тут |
+| Time | `timestamptz` UTC у БД; UI показує Europe/Kyiv | тут |
+| Internationalisation | UI лише українською | — |
+| Event schema | кожна подія має `type` + `schema_version`; upcaster-и перетворюють старі версії при читанні | ADR-0004 |
+| Вхідні файли й URL (`file-intake`) | SSRF: лише http(s); DNS резолвиться, блокуються приватні/loopback/link-local адреси й 169.254.169.254; перевірка на кожному редиректі (≤ 3); таймаут 30 с. Ліміти: файл ≤ 50 МБ, ≤ 100 000 рядків (PRD §6), розпакований XLSX ≤ 200 МБ (захист від архівних бомб). Формули не виконуються — читається лише кешоване значення | PRD §6.1 + тут |
+| Rate limiting | ≤ 30 завантажень прайсів на магазин на годину (лічильник у Postgres; включно із запланованими фідами) | PRD §6.1 |
+| Observability | інструмент — Open question у §11; метрики й алерти — §7 | §7, §11 |
 
 ## 9. Architecture decisions
 
@@ -351,6 +348,7 @@ Each top-3 goal from §1 expanded into a full scenario:
 |---|---|---|---|
 | Open architectural decision: механізм пошуку кандидатів за схожістю (стадія (c) каскаду, §4.2) | Open question | Resolve before 2026-10-15; «Порівняти варіанти спайком: pg_trgm, пошук у пам'яті worker, ембедінги — за точністю і часом, перш ніж фіксувати» | gene.bilyy@gmail.com |
 | Open architectural decision: стек спостережуваності — метрики, помилки, алерти (§7 Monitoring) | Open question | Resolve before старт пілоту; «Спершу ядро, моніторинг пізніше: до пілоту фокус на ядрі зіставлення; інструмент моніторингу виберемо перед стартом пілоту» | gene.bilyy@gmail.com |
+| Open architectural decision: ідентифікація магазину й менеджера без автентифікації — джерело RequestContext {shop_id, manager_id} (§8; PRD §8 OQ #4) | Open question | Resolve before старт пілоту; «Потрібна порада Security Lead: хочу висновок Security Lead перед вибором між токеном магазину і basic auth» | gene.bilyy@gmail.com |
 
 ## 12. Glossary
 
