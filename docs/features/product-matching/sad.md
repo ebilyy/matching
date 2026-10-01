@@ -304,17 +304,18 @@ flowchart TB
 
 ## 9. Architecture decisions
 
-<!-- 🎯 Навіщо: ЗВОРОТНИЙ ІНДЕКС на папку adr/. `ls adr/` дає файли, §9 дає семантику —    -->
-<!--           чому вони існують, до якого зрізу SAD привʼязані, у якому статусі.           -->
-<!-- 📋 Що писати: таблиця з 4 колонками. Один рядок на ADR. Mixed status — це OK.         -->
-<!-- 📌 Приклад: «0001 | Зберігати урок як таблицю блоків | Accepted | §4».                -->
-
 | # | Title | Status | Section |
 |---|---|---|---|
-| <NNNN> | <imperative — e.g. "Use sliding window for rate limiting"> | Accepted | §<N> |
-| <NNNN> | <imperative — e.g. "Co-locate outbox worker in API process"> | Accepted | §<N> |
+| [0001](adr/0001-use-s-price-stack-nestjs-postgres-vue.md) | Use the s-price stack (NestJS 11 + TypeORM + Postgres 18 + Vue 3) for product-matching | Accepted | §2 |
+| [0002](adr/0002-upload-own-catalog-via-manager-ui-with-shared-import-pipeline.md) | Upload the own catalog via manager UI, reusing the price-import pipeline | Accepted | §3 |
+| [0003](adr/0003-run-imports-in-worker-process-with-postgres-job-queue.md) | Run imports in a separate worker process with a Postgres-backed job queue (pg-boss) | Accepted | §4 |
+| [0004](adr/0004-event-source-matches-and-decisions-with-inline-projections.md) | Event-source matches and manager decisions with inline projections | Accepted | §4 |
+| [0005](adr/0005-upsert-supplier-positions-in-place-after-staging-validation.md) | Upsert supplier positions in place after full staging validation | Accepted | §4 |
+| [0006](adr/0006-store-uploads-in-managed-eu-s3-bucket-with-30-day-lifecycle.md) | Store uploaded originals in a managed EU S3-compatible bucket with 30-day lifecycle | Accepted | §5 |
+| [0007](adr/0007-split-monolith-into-eight-nest-modules-with-ledger-as-sole-event-writer.md) | Split the monolith into eight NestJS modules with match-ledger as the sole event writer | Accepted | §5 |
+| [0008](adr/0008-isolate-shops-by-shop-id-with-enforced-repository-filter.md) | Isolate shops by shop_id column with an enforced repository filter and composite foreign keys | Accepted | §8 |
 
-ADR files live under `docs/features/<slug>/adr/NNNN-<title>.md`.
+ADR files live under `docs/features/product-matching/adr/NNNN-<title>.md`. Відкриті архітектурні рішення (ще не ADR) — у §11 з severity `Open question`.
 
 ## 10. Quality requirements
 
