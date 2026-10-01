@@ -41,29 +41,26 @@ Decision overrides:
 
 ## 2. Constraints
 
-<!-- 🎯 Навіщо: §4 (стратегія) працює тільки коли §2 зафіксувала, ЩО ВЖЕ ЗАФІКСОВАНО:    -->
-<!--           стек, версії, дедлайн, регуляторні вимоги. Це вхід, не вихід.             -->
-<!-- 📋 Що писати: чотири блоки — Технічні / Організаційні / Конвенції / Регуляторні.     -->
-<!-- 📌 Приклад: «Postgres 18» (не «Postgres»); «дедлайн Q3 — жорсткий» (не «бажано»).    -->
-
 **Technical.**
-- <Language + version, e.g. Go 1.26>
-- <Framework + version, e.g. chi v5.1, pgx v5.7>
-- <Datastore + version, e.g. Postgres 18>
-- <Architecture convention, e.g. hexagonal per CLAUDE.md>
+- TypeScript 5.7 на Node.js 24.18 (LTS) — ADR-0001.
+- Backend: NestJS 11 + TypeORM + `pg` 8; розбір прайсів — потокові Node-бібліотеки (exceljs streaming reader, csv-parse).
+- Datastore: Postgres 18.4 — єдине сховище (включно з чергою фонових задач і пошуком схожих — див. §4).
+- Frontend: Vue 3.5 SPA (Vite), як `schemka-front`.
+- Доставка: Docker Compose + Caddy 2.10 на одній VM, як `price-infrastructure`.
+- Архітектурна конвенція: feature-модулі NestJS, шари `controllers → services → repositories → entity` (як `schemka-backend`).
 
 **Organisational.**
-- <Effort budget, e.g. 3 person-weeks>
-- <Deadline, e.g. 2026-Q3 hard>
-- <Team composition, e.g. 1 backend + 0.5 frontend>
+- Бюджет: 4 людино-тижні, розмір M (PRD frontmatter; idea-brief §11). Запасу в графіку немає (idea-brief §12).
+- Жорсткий дедлайн пілоту: `<TBD by PM>` — див. §11.
+- Реальні прайси 2–3 пілотних магазинів — до 2026-10-15 (PRD §8); на них калібруються розбір і поріг «низької впевненості».
 
 **Conventions.**
-- <Link to CLAUDE.md or project conventions>
-- <Naming, ID strategy, error-handling pattern>
+- У цьому репо CLAUDE.md ще немає. Референсна конвенція — `../schemka/schemka-backend/CLAUDE.md`: feature-модулі в `src/modules/<feature>/`, міграції TypeORM CLI, Swagger на `/docs`. Код s-price не перевикористовується (окремий застосунок, idea-brief §15) — копіюється лише форма.
 
 **Regulatory / external.**
-- <e.g. GDPR — user deletion behavior per ADR-NNNN>
-- <e.g. SOC2, PCI — applicable controls>
+- Дані confidential (комерційна таємниця магазинів і постачальників); персональні дані — лише ім'я/email менеджера в історії (PRD §6.1).
+- Автентифікація й авторизація — поза межами ітерації (PRD §3, §1 overrides); обов'язкові лише ізоляція рішень магазину (AC-12) і розрізнення менеджерів (AC-14).
+- Обов'язкові контролі PRD §6.1: SSRF-захист фіду (лише публічні http(s), без приватних мереж і метаданих хмари, таймаут, ліміт розміру), ліміт розміру файлу й рядків, захист від архівних бомб, формули не виконуються, ≤ 30 завантажень прайсів на магазин на годину.
 
 ## 3. Context and scope
 
