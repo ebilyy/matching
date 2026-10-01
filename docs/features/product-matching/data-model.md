@@ -10,7 +10,7 @@ ticket: "<TBD>"
 
 # Data model — product-matching
 
-<!-- Stage 08+09 → .claude/skills/generate-data-model/SKILL.md. Migrations: /migrations/20261001120000..09 -->
+<!-- Stage 08+09 → .claude/skills/generate-data-model/SKILL.md. Migrations: /backend/migrations/20261001120000..09 -->
 
 > **Inputs:** [PRD](./PRD.md) §4–§6 · [SAD](./sad.md) §4, §6, §8 · ADR [0002](adr/0002-upload-own-catalog-via-manager-ui-with-shared-import-pipeline.md), [0003](adr/0003-run-imports-in-worker-process-with-postgres-job-queue.md), [0004](adr/0004-event-source-matches-and-decisions-with-inline-projections.md), [0005](adr/0005-upsert-supplier-positions-in-place-after-staging-validation.md), [0008](adr/0008-isolate-shops-by-shop-id-with-enforced-repository-filter.md)
 > **Rules:** [.claude/rules/migrations.md](../../../.claude/rules/migrations.md) (baseline + project overrides)

@@ -19,7 +19,7 @@ Cascade matching of a shop's own products to supplier price positions: automatic
 | [PRD](../PRD.md) | US-01…US-08, AC-01…AC-18, NFR §6, security §6.1 |
 | [SAD](../sad.md) | §4 strategy, §5 modules, §6 flows, §7 deployment, §8 crosscutting, §10 QG scenarios, §11 risks / OQs |
 | ADRs [0001](../adr/0001-use-s-price-stack-nestjs-postgres-vue.md) · [0002](../adr/0002-upload-own-catalog-via-manager-ui-with-shared-import-pipeline.md) · [0003](../adr/0003-run-imports-in-worker-process-with-postgres-job-queue.md) · [0004](../adr/0004-event-source-matches-and-decisions-with-inline-projections.md) · [0005](../adr/0005-upsert-supplier-positions-in-place-after-staging-validation.md) · [0006](../adr/0006-store-uploads-in-managed-eu-s3-bucket-with-30-day-lifecycle.md) · [0007](../adr/0007-split-monolith-into-eight-nest-modules-with-ledger-as-sole-event-writer.md) · [0008](../adr/0008-isolate-shops-by-shop-id-with-enforced-repository-filter.md) | All Accepted; constraints every task must respect |
-| [data-model](../data-model.md) + [migrations/](../../../../migrations/) | Tables, indexes, TBD-1…6 |
+| [data-model](../data-model.md) + [backend/migrations/](../../../../backend/migrations/) | Tables, indexes, TBD-1…6 |
 | [openapi.yaml](../contracts/openapi.yaml) · [events.md](../contracts/events.md) · [api-sync-report](../contracts/api-sync-report.md) | Endpoint contract, jobs, ledger events, sentinel error codes, D-1…D-15 |
 
 ## Hard rules every task respects

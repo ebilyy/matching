@@ -19,7 +19,7 @@ updated_at: "2026-10-01"
 
 ## Upstream (source of truth, do not duplicate here)
 
-- [migrations/](../../../../migrations/) `20261001120000…09` — the reviewed source of truth
+- [backend/migrations/](../../../../backend/migrations/) `20261001120000…09` — the reviewed source of truth
 - [rules/migrations.md](../../../../.claude/rules/migrations.md) → Project overrides (thin class per pair)
 - [data-model](../data-model.md)
 
