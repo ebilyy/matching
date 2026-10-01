@@ -3,7 +3,7 @@ status: Draft
 owner: "gene.bilyy@gmail.com"
 reviewers: ["Tech Lead", "Security Lead"]
 updated_at: "2026-10-01"
-feature_size: M     # provisional — effort signal M from idea-brief §7 (Approach C); risk of L because of the decision-invalidation logic in US-05 — confirm via sdlc:classify-size before sdlc:architecture-design (see §8)
+feature_size: M     # confirmed via sdlc:classify-size 2026-10-01 (5-15 PR, new module + API/migration, no breaking changes)
 stage: "03"
 ticket: "<TBD>"
 ---
