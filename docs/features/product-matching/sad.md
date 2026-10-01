@@ -154,32 +154,99 @@ C4Container
 
 ## 6. Runtime view
 
-<!-- 🎯 Навіщо: ПОТІК У RUNTIME для 1-2 критичних сценаріїв. Хто з ким коли і у якому     -->
-<!--           порядку говорить. Без §6 §5 — лише купа коробок без життя.                  -->
-<!-- 📋 Що писати: Mermaid sequenceDiagram. Учасники — імена з §5 (не вигадуй нові!).      -->
-<!--           Повідомлення семантичні («складає чорновик»), БЕЗ HTTP-методів/шляхів —     -->
-<!--           ендпоінт-рівневі sequence-діаграми зʼявляться у stage 06 (define-api).      -->
-<!-- 📌 Приклад: «methodist → web-app: складає чорновик → web-app → content-api: зберегти». -->
+Учасники — контейнери з §5 (у дужках — модуль NestJS, що виконує крок). Повідомлення семантичні; ендпоінт-рівень — на stage api-forge. Скасування зіставлення (AC-13) та інші потоки домальовує `sdlc:complete-sequence-diagrams`.
 
-**Critical flow 1: <flow name>**
+**Critical flow 1: Імпорт прайсу + каскад зіставлення (happy path; US-02, US-03, US-05, AC-02, AC-05, AC-07, AC-10, AC-11, AC-17)**
 
 ```mermaid
 sequenceDiagram
-    actor User
-    participant API
-    participant Service
-    participant DB
-    User->>API: <request>
-    API->>Service: <call>
-    Service->>DB: <write tx>
-    DB-->>Service: ok
-    Service-->>API: result
-    API-->>User: 201
+    actor Manager as Менеджер
+    participant UI as Web UI
+    participant API as api
+    participant S3 as Object storage (ЄС)
+    participant PG as Postgres
+    participant W as worker
+    Manager->>UI: завантажує файл прайсу постачальника
+    UI->>API: передає файл (file-intake: ліміт розміру, ліміт 30/год)
+    API->>S3: кладе оригінал файлу
+    API->>PG: в одній транзакції: запис імпорту (status=queued) + задача pg-boss
+    API-->>UI: імпорт прийнято, обробка у фоні
+    W->>PG: бере задачу (SKIP LOCKED)
+    W->>S3: потоково читає файл
+    W->>W: розбір у staging, валідація цін, перевірка схеми колонок (file-intake)
+    W->>PG: одна транзакція (price-import): диф зі живими позиціями, upsert, absent_since для зниклих
+    W->>PG: каскад (matching): (a) точний код, (b) запам'ятовані рішення за відбитком, (c) кандидати (механізм — §11 OQ)
+    W->>PG: пакетний append подій + оновлення проєкцій (match-ledger)
+    W->>PG: імпорт status=applied, дата прайсу
+    UI->>API: опитує статус імпорту
+    API-->>UI: N позицій розпізнано, M автозіставлено, K пропозицій у черзі
 ```
 
-<!-- For XS/S: 1 flow above is enough. For M+: add 2-4 more (e.g. failure-mode flow, async flow). -->
+**Critical flow 2: Відхилений імпорт — некоректні ціни або змінена схема колонок (failure; AC-03, AC-04)**
 
-**Critical flow 2: <e.g. async event propagation>** — <if applicable, otherwise N/A>.
+```mermaid
+sequenceDiagram
+    actor Manager as Менеджер
+    participant UI as Web UI
+    participant API as api
+    participant S3 as Object storage (ЄС)
+    participant PG as Postgres
+    participant W as worker
+    W->>PG: бере задачу імпорту
+    W->>S3: потоково читає файл
+    W->>W: розбір у staging (file-intake)
+    alt ціна не число або колонку ціни/назви не вказано (AC-03)
+        W->>PG: імпорт status=rejected + перелік колонок і рядків з помилками
+    else набір або порядок колонок відрізняється від запам'ятованої схеми (AC-04)
+        W->>PG: імпорт status=awaiting_mapping + відмінності схеми
+    end
+    Note over W,PG: живі позиції постачальника не змінювались — попередній прайс діє далі
+    Manager->>UI: відкриває імпорт
+    UI->>API: запитує деталі імпорту
+    API-->>UI: помилки або відмінності колонок
+    Manager->>UI: підтверджує нову розмітку (лише для awaiting_mapping)
+    UI->>API: передає розмітку
+    API->>PG: в одній транзакції: оновлена схема постачальника + нова задача pg-boss
+    Note over W,S3: worker повторно розбирає той самий файл з S3 — далі як flow 1
+```
+
+**Critical flow 3: Рішення по пропозиції при конкурентному доступі (PRD §6 «Конкурентні рішення»; AC-08)**
+
+```mermaid
+sequenceDiagram
+    actor M1 as Менеджер A
+    actor M2 as Менеджер B
+    participant API as api
+    participant PG as Postgres
+    M1->>API: підтверджує пропозицію P (бачив версію потоку v)
+    M2->>API: відхиляє пропозицію P (бачив версію потоку v)
+    API->>PG: транзакція A (review → match-ledger): append ProposalConfirmed з stream_version=v+1, оновлення проєкцій
+    API->>PG: транзакція B: append ProposalRejected з stream_version=v+1
+    PG-->>API: A — ok
+    PG-->>API: B — порушення унікальності (stream_id, stream_version)
+    API-->>M1: зіставлення створено; ціна й наявність з позиції застосовані
+    API-->>M2: 409 — пропозицію вже вирішено (підтвердив Менеджер A)
+```
+
+**Critical flow 4: Масове підтвердження з попередженням про низьку впевненість (AC-09)**
+
+```mermaid
+sequenceDiagram
+    actor Manager as Менеджер
+    participant UI as Web UI
+    participant API as api
+    participant PG as Postgres
+    Manager->>UI: фільтрує чергу за брендом, «підтвердити всі»
+    UI->>API: запит попереднього перегляду для фільтра (review)
+    API->>PG: рахує пропозиції фільтра і скільки з них з низькою впевненістю
+    API-->>UI: N пропозицій, з них L з низькою впевненістю + версії потоків
+    UI-->>Manager: попередження «L з N — низька впевненість. Підтвердити?»
+    Manager->>UI: підтверджує дію
+    UI->>API: масове рішення (≤ 1 000 пропозицій, з версіями потоків)
+    API->>PG: одна транзакція (match-ledger): пакетний append ProposalConfirmed з менеджером і часом, оновлення проєкцій
+    PG-->>API: ok (пропозиції, вирішені іншим за цей час, пропущено)
+    API-->>UI: створено X зіставлень, пропущено Y вже вирішених
+```
 
 ## 7. Deployment view
 
