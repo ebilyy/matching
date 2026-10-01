@@ -1,0 +1,5 @@
+ALTER TABLE suppliers
+    DROP COLUMN IF EXISTS phone,
+    DROP COLUMN IF EXISTS description,
+    DROP COLUMN IF EXISTS website,
+    DROP COLUMN IF EXISTS email;

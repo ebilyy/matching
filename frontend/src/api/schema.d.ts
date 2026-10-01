@@ -177,7 +177,14 @@ export interface paths {
     delete?: never
     options?: never
     head?: never
-    patch?: never
+    /**
+     * Update a supplier
+     * @description Edits the supplier card: name, contacts and feed URL (JSON merge semantics: an absent field stays
+     *     as is, `null` clears it; `name` cannot be cleared). The remembered column mapping and the price date
+     *     are not editable here: they change only through imports (AC-02, AC-04). Every field is an absolute
+     *     value, so a retry repeats the same write and needs no `Idempotency-Key`.
+     */
+    patch: operations['updateSupplier']
     trace?: never
   }
   '/api/v1/suppliers/{supplier_id}/price-imports': {
@@ -447,6 +454,102 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/shops': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List shops
+     * @description All shops, oldest first. Operator-only (D-16).
+     */
+    get: operations['listShops']
+    put?: never
+    /**
+     * Create a shop
+     * @description Creates a tenant. There is no self-signup in this iteration (data-model `shops`).
+     */
+    post: operations['createShop']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/shops/{shop_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get a shop
+     * @description A shop by id. Operator-only (D-16).
+     */
+    get: operations['getShop']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    /**
+     * Rename a shop
+     * @description Changes the shop name. Absent fields stay as they are.
+     */
+    patch: operations['updateShop']
+    trace?: never
+  }
+  '/api/v1/shops/{shop_id}/managers': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List managers of a shop
+     * @description Managers of the shop, oldest first. Operator-only (D-16).
+     */
+    get: operations['listManagers']
+    put?: never
+    /**
+     * Add a manager to a shop
+     * @description Names the actor shown in match history (AC-14). Credentials are out of scope (SAD §11).
+     */
+    post: operations['createManager']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/shops/{shop_id}/managers/{manager_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get a manager
+     * @description A manager of another shop answers 404 `manager.not_found` (AC-12).
+     */
+    get: operations['getManager']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    /**
+     * Rename a manager
+     * @description Changes the display name shown in match history (AC-14). Absent fields stay as they are.
+     */
+    patch: operations['updateManager']
+    trace?: never
+  }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -472,6 +575,9 @@ export interface components {
         | 'common.unauthenticated'
         | 'common.validation_failed'
         | 'common.internal'
+        | 'common.not_found'
+        | 'shop.not_found'
+        | 'manager.not_found'
         | 'own_product.not_found'
         | 'supplier.not_found'
         | 'supplier.feed_not_configured'
@@ -587,6 +693,12 @@ export interface components {
       /** Format: uuid */
       id: string
       name: string
+      /** Format: email */
+      email: string | null
+      phone: string | null
+      /** Format: uri */
+      website: string | null
+      description: string | null
       /** Format: uri */
       feed_url: string | null
       /** @description Remembered mapping (AC-02); null until the first price is applied. */
@@ -603,12 +715,34 @@ export interface components {
     }
     SupplierCreate: {
       name: string
-      /**
-       * Format: uri
-       * @description Public http(s) URL only (PRD §6.1).
-       */
-      feed_url?: string | null
+      email?: components['schemas']['SupplierEmail']
+      phone?: components['schemas']['SupplierPhone']
+      website?: components['schemas']['SupplierWebsite']
+      /** @description Free text shown on the supplier card. */
+      description?: string | null
+      feed_url?: components['schemas']['SupplierFeedUrl']
     }
+    /** @description Merge patch of the supplier card. Absent = unchanged, `null` = cleared. */
+    SupplierUpdate: {
+      name?: string
+      email?: components['schemas']['SupplierEmail']
+      phone?: components['schemas']['SupplierPhone']
+      website?: components['schemas']['SupplierWebsite']
+      /** @description Free text shown on the supplier card. */
+      description?: string | null
+      feed_url?: components['schemas']['SupplierFeedUrl']
+    }
+    /** Format: email */
+    SupplierEmail: string | null
+    /** @description Stored as typed; no format is enforced (the pilot has no SMS or call integration). */
+    SupplierPhone: string | null
+    /** Format: uri */
+    SupplierWebsite: string | null
+    /**
+     * Format: uri
+     * @description Public http(s) URL only (PRD §6.1).
+     */
+    SupplierFeedUrl: string | null
     SupplierPage: components['schemas']['PageInfo'] & {
       items: components['schemas']['Supplier'][]
     }
@@ -932,6 +1066,40 @@ export interface components {
       /** @description Rows in the review queue. */
       pending_proposals: number
     }
+    Shop: {
+      /** Format: uuid */
+      id: string
+      name: string
+      /** Format: date-time */
+      created_at: string
+    }
+    ShopCreate: {
+      name: string
+    }
+    ShopUpdate: {
+      name?: string
+    }
+    ShopPage: components['schemas']['PageInfo'] & {
+      items: components['schemas']['Shop'][]
+    }
+    Manager: {
+      /** Format: uuid */
+      id: string
+      /** Format: uuid */
+      shop_id: string
+      display_name: string
+      /** Format: date-time */
+      created_at: string
+    }
+    ManagerCreate: {
+      display_name: string
+    }
+    ManagerUpdate: {
+      display_name?: string
+    }
+    ManagerPage: components['schemas']['PageInfo'] & {
+      items: components['schemas']['Manager'][]
+    }
     PageInfo: {
       has_next: boolean
       has_prev: boolean
@@ -991,6 +1159,38 @@ export interface components {
          *       "code": "common.internal",
          *       "message": "Внутрішня помилка. Спробуйте ще раз.",
          *       "status": 500
+         *     }
+         */
+        'application/problem+json': components['schemas']['Error']
+      }
+    }
+    /** @description No such shop. */
+    ShopNotFound: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        /**
+         * @example {
+         *       "code": "shop.not_found",
+         *       "message": "Магазин не знайдено.",
+         *       "status": 404
+         *     }
+         */
+        'application/problem+json': components['schemas']['Error']
+      }
+    }
+    /** @description No such manager in this shop (also for another shop's manager — AC-12). */
+    ManagerNotFound: {
+      headers: {
+        [name: string]: unknown
+      }
+      content: {
+        /**
+         * @example {
+         *       "code": "manager.not_found",
+         *       "message": "Менеджера не знайдено.",
+         *       "status": 404
          *     }
          */
         'application/problem+json': components['schemas']['Error']
@@ -1260,6 +1460,10 @@ export interface components {
     OwnProductId: string
     /** @description Supplier position id (UUID v7). */
     SupplierPositionId: string
+    /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+    ShopId: string
+    /** @description Manager id (UUID v7). */
+    ManagerId: string
     /** @description Supplier id (UUID v7). */
     SupplierId: string
     /** @description Import id (UUID v7). */
@@ -1559,6 +1763,10 @@ export interface operations {
            *         {
            *           "id": "0199a3c1-5e6f-7b20-8c31-4d5e6f708192",
            *           "name": "Test Supplier",
+           *           "email": "supplier@example.test",
+           *           "phone": null,
+           *           "website": null,
+           *           "description": null,
            *           "feed_url": null,
            *           "column_mapping": null,
            *           "price_date": "2026-09-30T06:00:00Z",
@@ -1592,6 +1800,10 @@ export interface operations {
         /**
          * @example {
          *       "name": "Test Supplier",
+         *       "email": "supplier@example.test",
+         *       "phone": "+380000000000",
+         *       "website": "https://supplier.example.test",
+         *       "description": "Test supplier for automated tests.",
          *       "feed_url": "https://feeds.example.test/price.xlsx"
          *     }
          */
@@ -1636,6 +1848,43 @@ export interface operations {
       }
       401: components['responses']['Unauthenticated']
       404: components['responses']['SupplierNotFound']
+      500: components['responses']['Internal']
+    }
+  }
+  updateSupplier: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        /** @description Supplier id (UUID v7). */
+        supplier_id: components['parameters']['SupplierId']
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        /**
+         * @example {
+         *       "phone": "+380000000001",
+         *       "website": null
+         *     }
+         */
+        'application/json': components['schemas']['SupplierUpdate']
+      }
+    }
+    responses: {
+      /** @description The updated supplier. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['Supplier']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['SupplierNotFound']
+      422: components['responses']['ValidationFailed']
       500: components['responses']['Internal']
     }
   }
@@ -2277,6 +2526,344 @@ export interface operations {
         }
       }
       401: components['responses']['Unauthenticated']
+      500: components['responses']['Internal']
+    }
+  }
+  listShops: {
+    parameters: {
+      query?: {
+        /** @description Opaque cursor from `next_cursor`. Mutually exclusive with `before`. */
+        after?: components['parameters']['After']
+        /** @description Opaque cursor from `prev_cursor`. Mutually exclusive with `after`. */
+        before?: components['parameters']['Before']
+        /** @description Page size. The review queue page is 50 (PRD §6). */
+        limit?: components['parameters']['Limit']
+      }
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description A page of shops. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "items": [
+           *         {
+           *           "id": "0199a000-0000-7000-8000-00000000a001",
+           *           "name": "Test Shop A",
+           *           "created_at": "2026-10-01T09:00:00Z"
+           *         }
+           *       ],
+           *       "has_next": false,
+           *       "has_prev": false,
+           *       "next_cursor": null,
+           *       "prev_cursor": null
+           *     }
+           */
+          'application/json': components['schemas']['ShopPage']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  createShop: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        /**
+         * @example {
+         *       "name": "Test Shop"
+         *     }
+         */
+        'application/json': components['schemas']['ShopCreate']
+      }
+    }
+    responses: {
+      /** @description Shop created. */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "id": "0199a000-0000-7000-8000-00000000a001",
+           *       "name": "Test Shop",
+           *       "created_at": "2026-10-01T09:00:00Z"
+           *     }
+           */
+          'application/json': components['schemas']['Shop']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  getShop: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+        shop_id: components['parameters']['ShopId']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The shop. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "id": "0199a000-0000-7000-8000-00000000a001",
+           *       "name": "Test Shop A",
+           *       "created_at": "2026-10-01T09:00:00Z"
+           *     }
+           */
+          'application/json': components['schemas']['Shop']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['ShopNotFound']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  updateShop: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+        shop_id: components['parameters']['ShopId']
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        /**
+         * @example {
+         *       "name": "Test Shop Renamed"
+         *     }
+         */
+        'application/json': components['schemas']['ShopUpdate']
+      }
+    }
+    responses: {
+      /** @description The updated shop. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "id": "0199a000-0000-7000-8000-00000000a001",
+           *       "name": "Test Shop Renamed",
+           *       "created_at": "2026-10-01T09:00:00Z"
+           *     }
+           */
+          'application/json': components['schemas']['Shop']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['ShopNotFound']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  listManagers: {
+    parameters: {
+      query?: {
+        /** @description Opaque cursor from `next_cursor`. Mutually exclusive with `before`. */
+        after?: components['parameters']['After']
+        /** @description Opaque cursor from `prev_cursor`. Mutually exclusive with `after`. */
+        before?: components['parameters']['Before']
+        /** @description Page size. The review queue page is 50 (PRD §6). */
+        limit?: components['parameters']['Limit']
+      }
+      header?: never
+      path: {
+        /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+        shop_id: components['parameters']['ShopId']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description A page of managers. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "items": [
+           *         {
+           *           "id": "0199a000-0000-7000-8000-00000000a101",
+           *           "shop_id": "0199a000-0000-7000-8000-00000000a001",
+           *           "display_name": "Test User",
+           *           "created_at": "2026-10-01T09:00:00Z"
+           *         }
+           *       ],
+           *       "has_next": false,
+           *       "has_prev": false,
+           *       "next_cursor": null,
+           *       "prev_cursor": null
+           *     }
+           */
+          'application/json': components['schemas']['ManagerPage']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['ShopNotFound']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  createManager: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+        shop_id: components['parameters']['ShopId']
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        /**
+         * @example {
+         *       "display_name": "Test User"
+         *     }
+         */
+        'application/json': components['schemas']['ManagerCreate']
+      }
+    }
+    responses: {
+      /** @description Manager created. */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "id": "0199a000-0000-7000-8000-00000000a101",
+           *       "shop_id": "0199a000-0000-7000-8000-00000000a001",
+           *       "display_name": "Test User",
+           *       "created_at": "2026-10-01T09:00:00Z"
+           *     }
+           */
+          'application/json': components['schemas']['Manager']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['ShopNotFound']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  getManager: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+        shop_id: components['parameters']['ShopId']
+        /** @description Manager id (UUID v7). */
+        manager_id: components['parameters']['ManagerId']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The manager. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "id": "0199a000-0000-7000-8000-00000000a101",
+           *       "shop_id": "0199a000-0000-7000-8000-00000000a001",
+           *       "display_name": "Test User",
+           *       "created_at": "2026-10-01T09:00:00Z"
+           *     }
+           */
+          'application/json': components['schemas']['Manager']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['ManagerNotFound']
+      422: components['responses']['ValidationFailed']
+      500: components['responses']['Internal']
+    }
+  }
+  updateManager: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        /** @description Shop id (UUID v7). Operator endpoints only (D-16). */
+        shop_id: components['parameters']['ShopId']
+        /** @description Manager id (UUID v7). */
+        manager_id: components['parameters']['ManagerId']
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        /**
+         * @example {
+         *       "display_name": "Test User Renamed"
+         *     }
+         */
+        'application/json': components['schemas']['ManagerUpdate']
+      }
+    }
+    responses: {
+      /** @description The updated manager. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          /**
+           * @example {
+           *       "id": "0199a000-0000-7000-8000-00000000a101",
+           *       "shop_id": "0199a000-0000-7000-8000-00000000a001",
+           *       "display_name": "Test User Renamed",
+           *       "created_at": "2026-10-01T09:00:00Z"
+           *     }
+           */
+          'application/json': components['schemas']['Manager']
+        }
+      }
+      401: components['responses']['Unauthenticated']
+      404: components['responses']['ManagerNotFound']
+      422: components['responses']['ValidationFailed']
       500: components['responses']['Internal']
     }
   }

@@ -17,12 +17,13 @@ frontend/
 │   │   ├── schema.d.ts    ЗГЕНЕРОВАНО з openapi.yaml (npm run api:generate) — не редагувати
 │   │   └── client.ts      openapi-fetch: Bearer-токен + тост для кожної помилки problem+json
 │   ├── stores/            auth (dev-токен), notifications (черга тостів)
-│   ├── pages/             Каталог, Постачальники, Імпорти, Черга, Огляд
+│   ├── pages/             Каталог, Постачальники (+ картка), Імпорти, Черга, Огляд, Магазини (+ менеджери)
 │   ├── components/        спільні компоненти
 │   ├── composables/       useLoad — завантаження ресурсу при монтуванні
 │   ├── plugins/vuetify.ts
 │   ├── styles/main.css    порядок CSS-шарів Vuetify ↔ Tailwind
 │   └── utils/format.ts    дата/час у Europe/Kyiv, відсотки
+├── .env.development       адреса локального api для проксі (npm run dev)
 └── .env.mock              проксі на Prism для npm run dev:mock
 ```
 
@@ -36,7 +37,15 @@ npm run dev:mock   # Vite :5173 + Prism mock :4010 з openapi.yaml — беке�
 npm run dev        # Vite :5173, /api і /health проксіюються на localhost:3000 (docker compose з кореня)
 ```
 
-Будь-який непорожній токен у полі «Токен (dev)» проходить у Prism; без токена API відповідає 401.
+Адреса API:
+
+| Змінна | Де | Значення за замовчуванням |
+|---|---|---|
+| `API_PROXY_TARGET` | `.env.development`, `.env.mock` | `http://localhost:3000` (dev) / `http://127.0.0.1:4010` (mock) — куди Vite проксіює `/api` і `/health` |
+| `VITE_API_BASE_URL` | `.env.development` або `.env.local` | порожньо = той самий origin (проксі Vite / Caddy). Шляхи вже містять `/api/v1`, тож тут лише origin, напр. `http://localhost:3000`; тоді api має дозволяти CORS |
+
+У полі «Магазин (dev)» в app bar оберіть магазин: його id стає bearer-токеном. Це тимчасова заміна
+RequestContext до T03 (бекенд: `ShopContextGuard`), без неї тенантні ендпоінти (`/suppliers`…) відповідають 401.
 Справжню схему автентифікації ще не обрано (SAD §11).
 
 ## Контракт API

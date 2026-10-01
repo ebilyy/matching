@@ -27,7 +27,7 @@ Skill: `api-forge` (stage 10), initial run. **Scenario A**: `data-model.md` is p
 
 ## Outputs
 
-- [`openapi.yaml`](./openapi.yaml): OpenAPI 3.1.0, 20 operations (19 under `/api/v1` plus `/health`), 17 error codes, examples on every operation.
+- [`openapi.yaml`](./openapi.yaml): OpenAPI 3.1.0, 30 operations (29 under `/api/v1` plus `/health`), 20 error codes, examples on every operation.
 - [`events.md`](./events.md): 3 pg-boss job contracts (`catalog.import`, `price.import`, `feed.fetch` plus DLQ) and the ledger event envelope with 6 types.
 - `.claude/rules/openapi.md`: defaults baseline plus product-matching overrides.
 
@@ -40,7 +40,7 @@ Skill: `api-forge` (stage 10), initial run. **Scenario A**: `data-model.md` is p
 | listOwnProducts | `GET /api/v1/own-products` | US-06, US-08 entry point | — | SELECT `own_products` |
 | getOwnProductOffers | `GET /api/v1/own-products/{id}/offers` | AC-16, AC-17, AC-18 | SAD US-08 | `matches` ⨝ `supplier_positions` ⨝ `suppliers`; `match_proposals` |
 | getOwnProductHistory | `GET /api/v1/own-products/{id}/history` | AC-13, AC-14 | SAD US-06 | SELECT `match_events` ⨝ `managers` |
-| listSuppliers / createSupplier / getSupplier | `/api/v1/suppliers[/{id}]` | AC-02 precondition, AC-18 | — | `suppliers` |
+| listSuppliers / createSupplier / getSupplier / updateSupplier | `/api/v1/suppliers[/{id}]` | AC-02 precondition, AC-18; update: F-2 | — | `suppliers` |
 | uploadSupplierPrice | `POST /api/v1/suppliers/{id}/price-imports` | US-02, AC-02…AC-04 | flow 1, 2 | INSERT `imports` (kind=price) + job |
 | fetchSupplierFeed | `POST /api/v1/suppliers/{id}/feed-fetches` | US-02 (feed) | SAD US-02 | job `feed.fetch` (import row created by worker) |
 | listImports / getImport | `/api/v1/imports[/{id}]` | AC-02, AC-03, AC-04 | flow 1 (polling), 2 | SELECT `imports` |
@@ -52,6 +52,8 @@ Skill: `api-forge` (stage 10), initial run. **Scenario A**: `data-model.md` is p
 | rejectMatchProposal | `POST /api/v1/match-proposals/{op}/{sp}/reject` | AC-10 | flow 3 | INSERT `match_events` (ProposalRejected) + projections |
 | cancelMatch | `POST /api/v1/matches/{op}/{sp}/cancel` | AC-13 | SAD US-06 | INSERT `match_events` (MatchCancelled) + projections |
 | getCoverage | `GET /api/v1/coverage` | AC-15 | (US-07 trivial) | COUNT DISTINCT `matches.own_product_id`, COUNT `match_proposals` |
+| listShops / createShop / getShop / updateShop | `/api/v1/shops[/{shop_id}]` (operator, D-16) | — | — | `shops` |
+| listManagers / createManager / getManager / updateManager | `/api/v1/shops/{shop_id}/managers[/{manager_id}]` (operator, D-16) | AC-14 (actor name) | — | `managers` |
 | getHealth | `GET /health` | — | SAD §7 | none |
 
 ## Section A — field origins
@@ -68,8 +70,11 @@ Grouped by schema, because schemas are reused via `$ref` across operations. Conf
 | `ColumnMapping.columns[].{header, role}` | JSONB inner shape: "заголовки + роль кожної колонки" (data-model). Order kept for AC-04 | medium |
 | `ColumnRole` enum | Target columns of `own_products` / `supplier_positions` that are filled from a file | medium |
 | `Supplier.{id, name, feed_url, column_mapping, price_date, created_at}` | `suppliers.*` | high |
+| `Supplier.{email, phone, website, description}`, same in `SupplierCreate` / `SupplierUpdate` | `suppliers.*` (migration `20261001120010_add_contacts_to_suppliers`) | high |
+| `SupplierUpdate` (merge patch: absent = unchanged, `null` = cleared) | `UPDATE suppliers` of the card fields; `column_mapping` and `price_date` change only through imports | high |
 | `Supplier.is_price_stale` | `price_date < now() − 7 days` (AC-18) | high |
-| `SupplierCreate.feed_url` pattern `^https?://` | PRD §6.1 | high |
+| `SupplierCreate.feed_url` / `SupplierUpdate.feed_url` pattern `^https?://` | PRD §6.1 | high |
+| `SupplierWebsite` pattern `^https?://` | Contract choice: the UI renders it as a link, so only http(s) | medium |
 | `SupplierRef.{id, name}` | `suppliers.id, name` | high |
 | `SupplierPosition.{id, supplier_code, name, barcode, manufacturer_code, brand, price, in_stock, stock_quantity, absent_since}` | `supplier_positions.*` | high |
 | `SupplierPosition.supplier` | join `suppliers` | high |
@@ -110,9 +115,9 @@ Grouped by schema, because schemas are reused via `$ref` across operations. Conf
 
 | # | Check | Result |
 |---|---|---|
-| 1 | **Endpoint ↔ data-model** | ✓ All 19 business endpoints map to ≥ 1 query or mutation on a data-model table (Endpoint map above). `/health` touches no table, by design. |
+| 1 | **Endpoint ↔ data-model** | ✓ All 29 business endpoints map to ≥ 1 query or mutation on a data-model table (Endpoint map above). `/health` touches no table, by design. |
 | 2 | **Error codes ↔ domain sentinels** | ✗ **Not verifiable: no `src/` exists yet.** The 17 codes are listed below as the sentinel catalog to create with the NestJS skeleton. Constraint-derived codes are covered: `uq_match_events_stream_version` → `match_proposal.already_decided` / `match.version_conflict` (409); `uq_imports_shop_id_idempotency_key` → idempotent replay (200, not an error); `uq_own_products_shop_id_sku` → upsert key (not an error); composite FKs plus the `shop_id` filter → `*.not_found` (404, AC-12). |
-| 3 | **Validation ↔ DB constraints** | ✓ Every `maxLength` equals its `VARCHAR(N)`: sku 100, own and position name 500, barcode 32, manufacturer_code 100, brand 200, category 500, supplier name 200, supplier_code 100, original_filename 255, display_name 200, Idempotency-Key 200 (160 for feed, so `uuid:` + key fits 200). `price` NUMERIC(14,4) → decimal string `^-?\d{1,10}(\.\d{1,4})?$`. `confidence` NUMERIC(4,3) → `0..1` (3-decimal precision documented, not enforced: `multipleOf` on floats is unreliable). `feed_url` TEXT → no `maxLength`. All enums equal the documented values in data-model (`kind`, `source`, `status`, `origin`, `reason`, `decision`, `type`). No PRD-vs-DDL conflicts. |
+| 3 | **Validation ↔ DB constraints** | ✓ Every `maxLength` equals its `VARCHAR(N)`: sku 100, own and position name 500, barcode 32, manufacturer_code 100, brand 200, category 500, supplier name 200, supplier email 254, supplier phone 32, supplier_code 100, original_filename 255, display_name 200, Idempotency-Key 200 (160 for feed, so `uuid:` + key fits 200). `price` NUMERIC(14,4) → decimal string `^-?\d{1,10}(\.\d{1,4})?$`. `confidence` NUMERIC(4,3) → `0..1` (3-decimal precision documented, not enforced: `multipleOf` on floats is unreliable). `feed_url`, `website`, `description` TEXT → no `maxLength`. All enums equal the documented values in data-model (`kind`, `source`, `status`, `origin`, `reason`, `decision`, `type`). No PRD-vs-DDL conflicts. |
 | 4 | **Entity ↔ endpoint** | ✓ with notes. 8/10 tables are served. `supplier_positions` appears only embedded (proposals, offers, history), with no standalone endpoint, by design. `remembered_decisions` appears only as the response of reject and cancel. **Internal:** `shops` (created by an operator, implicit through the credential) and `managers` (only `display_name` via `Actor`; identity is an open question, TBD-3). |
 | 5 | **OpenAPI ↔ sequence** | ✓ Every status code drawn in SAD §6 is in the spec: US-01 202, US-02 202, US-06 404 / 409, US-08 404, flow 3 409. Flow 1 polling → `getImport`; flow 2 "передає розмітку" → `confirmImportMapping` (202); flow 4 → preview + bulk. The SAD sequences are container-level and name no methods or paths, so method/path alignment can only be checked after back-port (follow-up F-1). No orphan sequences: the cron feed branch is a job, not an endpoint. |
 
@@ -156,6 +161,8 @@ Empty (scenario A).
 | D-6 | Resources have UUID ids | Proposals and matches are addressed by the pair `/{own_product_id}/{supplier_position_id}` | Projections are keyed by the stream (ADR-0004, rules override). |
 | D-7 | Enum values snake_case | `MatchEventType` is PascalCase (`AutoMatched`, …) | Verbatim from data-model / `match_events.type`, so there is no mapping layer to drift. |
 | D-8 | Everything under `/api/v1` | `/health` at the root, `security: []` | SAD §7 names `/health` for the uptime probe. |
+| D-17 | `Idempotency-Key` on mutating + retriable PATCH | `updateSupplier` has none | Every field of the merge patch is an absolute value, so a retried PATCH writes the same state again. |
+| D-16 | `shop_id` never in paths (ADR-0008 override) | `operator` endpoints `/shops`, `/shops/{shop_id}`, `/shops/{shop_id}/managers…` take `shop_id` from the path | Shops and managers are managed by an operator across tenants, so there is no RequestContext shop to scope by. Access will be limited by role (guard pending); until then these endpoints are as open as the rest of the API. Not derived from PRD/SAD: needs owner confirmation and an ADR for the shops/managers modules beyond ADR-0007. |
 
 ## Contract decisions beyond the sources (need owner confirmation)
 
@@ -172,7 +179,7 @@ None of these contradicts a source; each fills a gap the sources leave open. Own
 ## Follow-ups (supporting checks and gaps)
 
 - **F-1** Back-port to SAD §6: resolve `<!-- TODO: align with openapi.yaml -->` in US-02, and optionally add `### Endpoint-level:` sequences for `confirmMatchProposal` and `cancelMatch` so check 5 can compare methods and paths.
-- **F-2** No way to change a supplier after creation (`feed_url`, `name`). No AC asks for it, but a shop that gets a feed later cannot use it. Add `PATCH /api/v1/suppliers/{id}` if PM agrees.
+- **F-2** ~~No way to change a supplier after creation.~~ Done: `PATCH /api/v1/suppliers/{id}` (`updateSupplier`) edits the name, contacts and `feed_url`; added together with the supplier contacts (2026-10-01).
 - **F-3** `listOwnProducts` has no search or filter (by SKU, name, "no reliable code"). No AC asks for it. With 50 000 products, US-08 ("для кожного власного товару") will probably need it.
 - **F-4** Gap 3 from `_audit/sequences-2026-10-01.md` (does a catalog re-upload re-run the cascade?) is still open. The contract is unaffected either way: it would be one more job, not an endpoint.
 - **F-5** Retry policy for `catalog.import` / `price.import` jobs is TBD (`events.md`).

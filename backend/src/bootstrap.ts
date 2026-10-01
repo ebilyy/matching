@@ -2,6 +2,8 @@ import type { INestApplication, INestApplicationContext } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
 import { ApiModule } from './api.module';
+import { ProblemFilter } from './common/errors/problem.filter';
+import { createValidationPipe } from './common/validation/validation.pipe';
 import { WorkerModule } from './worker.module';
 
 export const API_PREFIX = 'api/v1';
@@ -12,6 +14,8 @@ export async function createApiApp(): Promise<INestApplication> {
   });
   app.useLogger(app.get(Logger));
   app.setGlobalPrefix(API_PREFIX, { exclude: ['health'] });
+  app.useGlobalPipes(createValidationPipe());
+  app.useGlobalFilters(new ProblemFilter());
   app.enableShutdownHooks();
   return app;
 }

@@ -42,6 +42,9 @@ const problemToast: Middleware = {
   },
 }
 
-// Same origin: Caddy (prod) or the Vite proxy (dev) forward /api to the backend.
-export const api = createClient<paths>({ baseUrl: location.origin })
+// Default is same origin: Caddy (prod) or the Vite proxy (dev) forward /api to the backend.
+// Paths in schema.d.ts already start with /api/v1, so the base URL is an origin without a path.
+export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || location.origin).replace(/\/+$/, '')
+
+export const api = createClient<paths>({ baseUrl: apiBaseUrl })
 api.use(auth, problemToast)

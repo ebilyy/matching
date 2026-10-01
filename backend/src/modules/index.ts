@@ -1,3 +1,5 @@
+export * from './shops/shops.module';
+export * from './managers/managers.module';
 export * from './catalog/catalog.module';
 export * from './suppliers/suppliers.module';
 export * from './file-intake/file-intake.module';

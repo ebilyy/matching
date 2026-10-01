@@ -15,7 +15,8 @@ info:
     через підтверджені зіставлення (інваріант CONTEXT).
 
     **Conventions**
-    - Tenancy (ADR-0008): `shop_id` never appears in paths or bodies. Every request resolves to
+    - Tenancy (ADR-0008): `shop_id` never appears in paths or bodies (exception: the cross-tenant
+      `operator` endpoints, api-sync-report D-16). Every request resolves to
       `RequestContext {shop_id, manager_id}` from its credential. A resource of another shop answers
       `404 <entity>.not_found` (AC-12). The credential scheme is an open question (SAD §11); `BearerAuth`
       is the placeholder.
@@ -53,6 +54,8 @@ tags:
     description: Review queue — list, confirm / reject, bulk confirm, cancel (US-04, US-06)
   - name: offers
     description: Purchase price and availability, history, coverage (US-06…US-08)
+  - name: operator
+    description: Shops and their managers, across tenants. Operator-only; the role guard is pending (api-sync-report D-16)
   - name: ops
     description: Operational endpoints
 
@@ -246,6 +249,10 @@ paths:
                 items:
                   - id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
                     name: "Test Supplier"
+                    email: "supplier@example.test"
+                    phone: null
+                    website: null
+                    description: null
                     feed_url: null
                     column_mapping: null
                     price_date: "2026-09-30T06:00:00Z"
@@ -271,7 +278,13 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/SupplierCreate" }
-            example: { name: "Test Supplier", feed_url: "https://feeds.example.test/price.xlsx" }
+            example:
+              name: "Test Supplier"
+              email: "supplier@example.test"
+              phone: "+380000000000"
+              website: "https://supplier.example.test"
+              description: "Test supplier for automated tests."
+              feed_url: "https://feeds.example.test/price.xlsx"
       responses:
         "201":
           description: Supplier created.
@@ -302,6 +315,35 @@ paths:
                 withMapping: { $ref: "#/components/examples/Supplier" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "404": { $ref: "#/components/responses/SupplierNotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+    patch:
+      tags: [suppliers]
+      summary: Update a supplier
+      description: |
+        Edits the supplier card: name, contacts and feed URL (JSON merge semantics: an absent field stays
+        as is, `null` clears it; `name` cannot be cleared). The remembered column mapping and the price date
+        are not editable here: they change only through imports (AC-02, AC-04). Every field is an absolute
+        value, so a retry repeats the same write and needs no `Idempotency-Key`.
+      operationId: updateSupplier
+      parameters:
+        - $ref: "#/components/parameters/SupplierId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SupplierUpdate" }
+            example: { phone: "+380000000001", website: null }
+      responses:
+        "200":
+          description: The updated supplier.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Supplier" }
+              examples:
+                updated: { $ref: "#/components/examples/Supplier" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/SupplierNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
         "500": { $ref: "#/components/responses/Internal" }
 
   /api/v1/suppliers/{supplier_id}/price-imports:
@@ -730,6 +772,198 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  # ---------------------------------------------------------------- operator
+  /api/v1/shops:
+    get:
+      tags: [operator]
+      summary: List shops
+      description: All shops, oldest first. Operator-only (D-16).
+      operationId: listShops
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Before"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of shops.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShopPage" }
+              example:
+                items:
+                  - { id: 0199a000-0000-7000-8000-00000000a001, name: "Test Shop A", created_at: "2026-10-01T09:00:00Z" }
+                has_next: false
+                has_prev: false
+                next_cursor: null
+                prev_cursor: null
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+    post:
+      tags: [operator]
+      summary: Create a shop
+      description: Creates a tenant. There is no self-signup in this iteration (data-model `shops`).
+      operationId: createShop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShopCreate" }
+            example: { name: "Test Shop" }
+      responses:
+        "201":
+          description: Shop created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+              example: { id: 0199a000-0000-7000-8000-00000000a001, name: "Test Shop", created_at: "2026-10-01T09:00:00Z" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/shops/{shop_id}:
+    get:
+      tags: [operator]
+      summary: Get a shop
+      description: A shop by id. Operator-only (D-16).
+      operationId: getShop
+      parameters:
+        - $ref: "#/components/parameters/ShopId"
+      responses:
+        "200":
+          description: The shop.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+              example: { id: 0199a000-0000-7000-8000-00000000a001, name: "Test Shop A", created_at: "2026-10-01T09:00:00Z" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ShopNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+    patch:
+      tags: [operator]
+      summary: Rename a shop
+      description: Changes the shop name. Absent fields stay as they are.
+      operationId: updateShop
+      parameters:
+        - $ref: "#/components/parameters/ShopId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShopUpdate" }
+            example: { name: "Test Shop Renamed" }
+      responses:
+        "200":
+          description: The updated shop.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shop" }
+              example: { id: 0199a000-0000-7000-8000-00000000a001, name: "Test Shop Renamed", created_at: "2026-10-01T09:00:00Z" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ShopNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/shops/{shop_id}/managers:
+    get:
+      tags: [operator]
+      summary: List managers of a shop
+      description: Managers of the shop, oldest first. Operator-only (D-16).
+      operationId: listManagers
+      parameters:
+        - $ref: "#/components/parameters/ShopId"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Before"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of managers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManagerPage" }
+              example:
+                items:
+                  - { id: 0199a000-0000-7000-8000-00000000a101, shop_id: 0199a000-0000-7000-8000-00000000a001, display_name: "Test User", created_at: "2026-10-01T09:00:00Z" }
+                has_next: false
+                has_prev: false
+                next_cursor: null
+                prev_cursor: null
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ShopNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+    post:
+      tags: [operator]
+      summary: Add a manager to a shop
+      description: Names the actor shown in match history (AC-14). Credentials are out of scope (SAD §11).
+      operationId: createManager
+      parameters:
+        - $ref: "#/components/parameters/ShopId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManagerCreate" }
+            example: { display_name: "Test User" }
+      responses:
+        "201":
+          description: Manager created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Manager" }
+              example: { id: 0199a000-0000-7000-8000-00000000a101, shop_id: 0199a000-0000-7000-8000-00000000a001, display_name: "Test User", created_at: "2026-10-01T09:00:00Z" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ShopNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/shops/{shop_id}/managers/{manager_id}:
+    get:
+      tags: [operator]
+      summary: Get a manager
+      description: A manager of another shop answers 404 `manager.not_found` (AC-12).
+      operationId: getManager
+      parameters:
+        - $ref: "#/components/parameters/ShopId"
+        - $ref: "#/components/parameters/ManagerId"
+      responses:
+        "200":
+          description: The manager.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Manager" }
+              example: { id: 0199a000-0000-7000-8000-00000000a101, shop_id: 0199a000-0000-7000-8000-00000000a001, display_name: "Test User", created_at: "2026-10-01T09:00:00Z" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ManagerNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+    patch:
+      tags: [operator]
+      summary: Rename a manager
+      description: Changes the display name shown in match history (AC-14). Absent fields stay as they are.
+      operationId: updateManager
+      parameters:
+        - $ref: "#/components/parameters/ShopId"
+        - $ref: "#/components/parameters/ManagerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManagerUpdate" }
+            example: { display_name: "Test User Renamed" }
+      responses:
+        "200":
+          description: The updated manager.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Manager" }
+              example: { id: 0199a000-0000-7000-8000-00000000a101, shop_id: 0199a000-0000-7000-8000-00000000a001, display_name: "Test User Renamed", created_at: "2026-10-01T09:00:00Z" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/ManagerNotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/Internal" }
+
 components:
   securitySchemes:
     BearerAuth:
@@ -752,6 +986,18 @@ components:
       in: path
       required: true
       description: Supplier position id (UUID v7).
+      schema: { type: string, format: uuid }
+    ShopId:
+      name: shop_id
+      in: path
+      required: true
+      description: Shop id (UUID v7). Operator endpoints only (D-16).
+      schema: { type: string, format: uuid }
+    ManagerId:
+      name: manager_id
+      in: path
+      required: true
+      description: Manager id (UUID v7).
       schema: { type: string, format: uuid }
     SupplierId:
       name: supplier_id
@@ -853,6 +1099,9 @@ components:
             - common.unauthenticated
             - common.validation_failed
             - common.internal
+            - common.not_found
+            - shop.not_found
+            - manager.not_found
             - own_product.not_found
             - supplier.not_found
             - supplier.feed_not_configured
@@ -1023,10 +1272,15 @@ components:
     Supplier:
       type: object
       additionalProperties: false
-      required: [id, name, feed_url, column_mapping, price_date, is_price_stale, created_at]
+      required:
+        [id, name, email, phone, website, description, feed_url, column_mapping, price_date, is_price_stale, created_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string, maxLength: 200 }
+        email: { type: [string, "null"], format: email, maxLength: 254 }
+        phone: { type: [string, "null"], maxLength: 32 }
+        website: { type: [string, "null"], format: uri }
+        description: { type: [string, "null"] }
         feed_url: { type: [string, "null"], format: uri }
         column_mapping:
           description: Remembered mapping (AC-02); null until the first price is applied.
@@ -1048,11 +1302,42 @@ components:
       required: [name]
       properties:
         name: { type: string, minLength: 1, maxLength: 200 }
-        feed_url:
-          type: [string, "null"]
-          format: uri
-          pattern: "^https?://"
-          description: Public http(s) URL only (PRD §6.1).
+        email: { $ref: "#/components/schemas/SupplierEmail" }
+        phone: { $ref: "#/components/schemas/SupplierPhone" }
+        website: { $ref: "#/components/schemas/SupplierWebsite" }
+        description: { type: [string, "null"], description: Free text shown on the supplier card. }
+        feed_url: { $ref: "#/components/schemas/SupplierFeedUrl" }
+
+    SupplierUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: Merge patch of the supplier card. Absent = unchanged, `null` = cleared.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        email: { $ref: "#/components/schemas/SupplierEmail" }
+        phone: { $ref: "#/components/schemas/SupplierPhone" }
+        website: { $ref: "#/components/schemas/SupplierWebsite" }
+        description: { type: [string, "null"], description: Free text shown on the supplier card. }
+        feed_url: { $ref: "#/components/schemas/SupplierFeedUrl" }
+
+    SupplierEmail:
+      type: [string, "null"]
+      format: email
+      maxLength: 254
+    SupplierPhone:
+      type: [string, "null"]
+      maxLength: 32
+      description: Stored as typed; no format is enforced (the pilot has no SMS or call integration).
+    SupplierWebsite:
+      type: [string, "null"]
+      format: uri
+      pattern: "^https?://"
+    SupplierFeedUrl:
+      type: [string, "null"]
+      format: uri
+      pattern: "^https?://"
+      description: Public http(s) URL only (PRD §6.1).
 
     SupplierPage:
       allOf:
@@ -1477,6 +1762,65 @@ components:
         pending_proposals: { type: integer, minimum: 0, description: Rows in the review queue. }
 
     # ---------- pagination
+    Shop:
+      type: object
+      additionalProperties: false
+      required: [id, name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        created_at: { type: string, format: date-time }
+    ShopCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+    ShopUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+    ShopPage:
+      allOf:
+        - $ref: "#/components/schemas/PageInfo"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/Shop" }
+
+    Manager:
+      type: object
+      additionalProperties: false
+      required: [id, shop_id, display_name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        shop_id: { type: string, format: uuid }
+        display_name: { type: string, maxLength: 200 }
+        created_at: { type: string, format: date-time }
+    ManagerCreate:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 200 }
+    ManagerUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 200 }
+    ManagerPage:
+      allOf:
+        - $ref: "#/components/schemas/PageInfo"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/Manager" }
+
     PageInfo:
       type: object
       required: [has_next, has_prev, next_cursor, prev_cursor]
@@ -1515,6 +1859,18 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Error" }
           example: { code: common.internal, message: "Внутрішня помилка. Спробуйте ще раз.", status: 500 }
+    ShopNotFound:
+      description: No such shop.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: shop.not_found, message: "Магазин не знайдено.", status: 404 }
+    ManagerNotFound:
+      description: No such manager in this shop (also for another shop's manager — AC-12).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { code: manager.not_found, message: "Менеджера не знайдено.", status: 404 }
     OwnProductNotFound:
       description: No such own product in this shop (also for another shop's id — AC-12).
       content:
@@ -1635,6 +1991,10 @@ components:
       value:
         id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
         name: "Test Supplier"
+        email: "supplier@example.test"
+        phone: "+380000000001"
+        website: null
+        description: "Test supplier for automated tests."
         feed_url: "https://feeds.example.test/price.xlsx"
         column_mapping:
           columns:
@@ -1649,6 +2009,10 @@ components:
       value:
         id: 0199a3c1-5e6f-7b20-8c31-4d5e6f708192
         name: "Test Supplier"
+        email: "supplier@example.test"
+        phone: "+380000000000"
+        website: "https://supplier.example.test"
+        description: "Test supplier for automated tests."
         feed_url: "https://feeds.example.test/price.xlsx"
         column_mapping: null
         price_date: null

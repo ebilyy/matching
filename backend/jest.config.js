@@ -10,9 +10,20 @@ const base = {
 module.exports = {
   projects: [
     // Unit: next to the code, no I/O.
-    { ...base, displayName: 'unit', rootDir: 'src', testRegex: '.*\\.spec\\.ts$' },
+    {
+      ...base,
+      displayName: 'unit',
+      rootDir: 'src',
+      testRegex: '.*\\.spec\\.ts$',
+    },
     // Integration: boots Nest roles; from T02 on — against a real Postgres.
-    { ...base, displayName: 'integration', rootDir: 'test', testRegex: '.*\\.int-spec\\.ts$' },
+    {
+      ...base,
+      displayName: 'integration',
+      rootDir: 'test',
+      testRegex: '.*\\.int-spec\\.ts$',
+      setupFiles: [...base.setupFiles, '<rootDir>/support/db-env.ts'],
+    },
   ],
   coverageDirectory: 'coverage',
 };

@@ -1,11 +1,15 @@
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
 import { ref } from 'vue'
 
 import AppToasts from '@/components/AppToasts.vue'
 import DevTokenField from '@/components/DevTokenField.vue'
 import { navRoutes } from '@/router'
+import { useAuthStore } from '@/stores/auth'
 
 const drawer = ref<boolean | null>(null)
+// Switching the dev shop remounts the page, so it refetches as the new shop.
+const { token } = storeToRefs(useAuthStore())
 </script>
 
 <template>
@@ -32,7 +36,7 @@ const drawer = ref<boolean | null>(null)
 
     <v-main>
       <v-container class="py-6">
-        <router-view />
+        <router-view :key="token" />
       </v-container>
     </v-main>
 

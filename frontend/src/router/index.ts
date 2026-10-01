@@ -31,6 +31,12 @@ export const navRoutes = [
     component: () => import('@/pages/CoveragePage.vue'),
     meta: { title: 'Огляд', icon: 'mdi-chart-donut' },
   },
+  {
+    path: '/shops',
+    name: 'shops',
+    component: () => import('@/pages/ShopsPage.vue'),
+    meta: { title: 'Магазини', icon: 'mdi-storefront-outline' },
+  },
 ] satisfies RouteRecordRaw[]
 
 declare module 'vue-router' {
@@ -45,6 +51,20 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: { name: 'catalog' } },
     ...navRoutes,
+    {
+      path: '/suppliers/:supplierId',
+      name: 'supplier',
+      component: () => import('@/pages/SupplierPage.vue'),
+      props: true,
+      meta: { title: 'Постачальник' },
+    },
+    {
+      path: '/shops/:shopId',
+      name: 'shop',
+      component: () => import('@/pages/ShopPage.vue'),
+      props: true,
+      meta: { title: 'Магазин' },
+    },
     { path: '/:pathMatch(.*)*', redirect: { name: 'catalog' } },
   ],
 })

@@ -11,11 +11,15 @@ export const OPENAPI_PATH = resolve(
   '../../../docs/features/product-matching/contracts/openapi.yaml',
 );
 
+type Response = { $ref?: string; content?: Record<string, unknown> };
 type Operation = {
   operationId?: string;
-  responses?: Record<string, { content?: Record<string, unknown> }>;
+  responses?: Record<string, Response>;
 };
-type OpenApiDoc = { paths: Record<string, Record<string, Operation>> };
+type OpenApiDoc = {
+  paths: Record<string, Record<string, Operation>>;
+  components?: { responses?: Record<string, Response> };
+};
 
 const doc = parse(readFileSync(OPENAPI_PATH, 'utf8')) as OpenApiDoc;
 const ajv = new Ajv2020({ strict: false, allErrors: true });
@@ -26,15 +30,22 @@ function locate(operationId: string, status: number) {
   for (const [path, item] of Object.entries(doc.paths)) {
     for (const [method, op] of Object.entries(item)) {
       if (op.operationId !== operationId) continue;
-      const response = op.responses?.[String(status)];
+      let response = op.responses?.[String(status)];
       if (!response) {
         throw new Error(`${operationId}: no ${status} response in openapi`);
+      }
+      // Shared responses: `{ $ref: '#/components/responses/<Name>' }`.
+      let base = ['paths', path, method, 'responses', String(status)];
+      if (response.$ref) {
+        const name = response.$ref.replace('#/components/responses/', '');
+        response = doc.components?.responses?.[name] ?? {};
+        base = ['components', 'responses', name];
       }
       const types = Object.keys(response.content ?? {});
       if (types.length !== 1) {
         throw new Error(`${operationId} ${status}: expected one content type`);
       }
-      const pointer = ['paths', path, method, 'responses', String(status)]
+      const pointer = base
         .concat(['content', types[0], 'schema'])
         .map((s) => s.replace(/~/g, '~0').replace(/\//g, '~1'))
         .join('/');

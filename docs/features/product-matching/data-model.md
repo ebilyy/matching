@@ -111,7 +111,7 @@ erDiagram
 
 | Aggregate | Root | Members | Owner module (ADR-0007) |
 |---|---|---|---|
-| Shop (tenant) | `shops` | `managers` | `common` |
+| Shop (tenant) | `shops` | `managers` | `shops`, `managers` (окремі модулі поза вісімкою ADR-0007) |
 | Catalog | `own_products` | — | `catalog` |
 | Supplier | `suppliers` | `supplier_positions` (upsert на місці, ADR-0005) | `suppliers`, `price-import` |
 | Import | `imports` | — (staging — TEMP-таблиці сесії worker) | `file-intake`, `price-import`, `catalog` |

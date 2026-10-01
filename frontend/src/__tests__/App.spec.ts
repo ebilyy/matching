@@ -21,14 +21,14 @@ vi.stubGlobal(
 )
 
 describe('App', () => {
-  it('renders the five nav sections', async () => {
+  it('renders the nav sections', async () => {
     router.push('/')
     await router.isReady()
 
     const wrapper = mount(App, { global: { plugins: [createPinia(), router, vuetify] } })
 
     const titles = wrapper.findAll('.v-list-item-title').map((item) => item.text())
-    expect(titles).toEqual(['Каталог', 'Постачальники', 'Імпорти', 'Черга', 'Огляд'])
+    expect(titles).toEqual(['Каталог', 'Постачальники', 'Імпорти', 'Черга', 'Огляд', 'Магазини'])
     expect(router.currentRoute.value.name).toBe('catalog')
   })
 })

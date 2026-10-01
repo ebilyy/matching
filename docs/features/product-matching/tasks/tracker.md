@@ -12,7 +12,7 @@ Status values: `todo` · `blocked` · `in-progress` · `in-review` · `done`. Up
 | ID | Task | Layer | Est | Pri | Deps | Owner | Status | PR |
 |----|------|-------|-----|-----|------|-------|--------|----|
 | T01 | [Scaffold the NestJS app with api/worker roles and local compose](./t01-project-skeleton.md) | foundation | L (8h) | P0 | — | gene.bilyy@gmail.com | in_progress | — |
-| T02 | [Wire the 10 SQL migration pairs into TypeORM CLI](./t02-migrations-wiring.md) | migration | M (4h) | P0 | T01 | gene.bilyy@gmail.com | todo | — |
+| T02 | [Wire the 10 SQL migration pairs into TypeORM CLI](./t02-migrations-wiring.md) | migration | M (4h) | P0 | T01 | gene.bilyy@gmail.com | in-progress | — |
 | T03 | [Add RequestContext, problem+json errors, 422 validation and cursor codec](./t03-common-context-errors.md) | crosscutting | M (4h) | P0 | T01 | gene.bilyy@gmail.com | todo | — |
 | T04 | [Map TypeORM entities for all 10 tables and add test fixture factories](./t04-entities-fixtures.md) | domain | L (8h) | P0 | T02 | gene.bilyy@gmail.com | todo | — |
 | T05 | [Enforce shop_id on every query (base repository + raw-SQL helper + isolation harness)](./t05-tenant-scoped-data-access.md) | infra/repo | M (4h) | P0 | T03, T04 | gene.bilyy@gmail.com | todo | — |

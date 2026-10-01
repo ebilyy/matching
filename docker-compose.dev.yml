@@ -13,15 +13,15 @@ x-app: &app
     - ./backend/src:/app/src:ro
     - ./backend/migrations:/app/migrations:ro
   depends_on:
-    postgres:
-      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
     minio:
       condition: service_healthy
   environment: &app-env
     NODE_ENV: development
     LOG_LEVEL: ${LOG_LEVEL:-info}
     LOG_FORMAT: ${LOG_FORMAT:-json}
-    # Consumed from T02 (database) and T07 (storage); listed here so the stand is complete.
+    # T07 (storage) consumes the S3_* block; listed here so the stand is complete.
     DB_HOST: postgres
     DB_PORT: 5432
     DB_USER: ${POSTGRES_USER:-pm}
@@ -72,6 +72,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # One-shot: applies backend/migrations via the TypeORM CLI, then exits (T02).
+  migrate:
+    <<: *app
+    restart: 'no'
+    command: ['npm', 'run', 'migration:run']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
 
   api:
     <<: *app

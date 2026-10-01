@@ -10,7 +10,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   // The SPA calls relative /api/... URLs, like behind Caddy in prod (SAD §7).
-  // `npm run dev` proxies to the local api; `npm run dev:mock` to Prism (.env.mock).
+  // `npm run dev` proxies to the local api (.env.development); `npm run dev:mock` to Prism (.env.mock).
   const apiTarget = env.API_PROXY_TARGET || 'http://localhost:3000'
 
   return {

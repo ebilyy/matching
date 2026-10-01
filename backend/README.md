@@ -14,15 +14,18 @@
 
 ```
 backend/
-├── migrations/            SQL-пари *.up.sql / *.down.sql — джерело правди схеми (підключення до TypeORM — T02)
+├── migrations/            SQL-пари *.up.sql / *.down.sql — джерело правди схеми
 ├── src/
 │   ├── main.ts            точка входу: читає APP_ROLE і запускає api або worker
 │   ├── bootstrap.ts       createApiApp() / createWorkerApp() — використовуються й у тестах
-│   ├── api.module.ts      роль api: config + logging + домен + /health
-│   ├── worker.module.ts   роль worker: config + logging + домен, без HTTP
+│   ├── api.module.ts      роль api: config + logging + database + домен + /health
+│   ├── worker.module.ts   роль worker: config + logging + database + домен, без HTTP
 │   ├── domain.module.ts   вісім модулів з ADR-0007
 │   ├── modules/           catalog, suppliers, file-intake, price-import, matching, match-ledger, review, offers
-│   ├── infrastructure/    database (TypeORM), jobs (pg-boss), storage (S3) — поки порожні
+│   ├── infrastructure/
+│   │   ├── database/      TypeORM DataSource + тонкі класи міграцій над SQL-парами
+│   │   ├── jobs/          pg-boss (T06) — поки порожньо
+│   │   └── storage/       S3 (T07) — поки порожньо
 │   ├── common/
 │   │   ├── config/        перевірка env через class-validator
 │   │   └── logging/       nestjs-pino: JSON, request_id, role, redaction
@@ -45,6 +48,8 @@ curl -i localhost:3000/health        # → 200 {"status":"ok"}
 
 У `api` і `worker` працює hot reload: каталог `backend/src` змонтовано в контейнери, і після збереження файлу застосунок перезбирається сам.
 Після змін у `package.json`, `tsconfig*.json` або `Dockerfile` образ треба перебудувати (`up -d --build`).
+
+Перед `api` і `worker` одноразово запускається сервіс `migrate` (`npm run migration:run`); вони стартують лише після його успішного завершення.
 
 Зупинка:
 
@@ -89,7 +94,8 @@ Postgres і MinIO можна взяти з compose: `docker compose -f docker-co
 | `PORT` | 0–65535 | `3000` | зараз (лише `api`) |
 | `LOG_LEVEL` | `fatal` … `trace`, `silent` | `info` | зараз |
 | `LOG_FORMAT` | `json` \| `pretty` | `json` | зараз |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | | див. `.env.example` | з T02 |
+| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | | — (обов'язкові) | зараз |
+| `DB_PORT` | 1–65535 | `5432` | зараз |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE` | | див. `.env.example` | з T07 |
 
 Невалідне значення зупиняє запуск з повідомленням `Invalid environment: ...`. Нові змінні треба додати в клас `Env` у [src/common/config/env.ts](src/common/config/env.ts).
@@ -107,6 +113,18 @@ Postgres і MinIO можна взяти з compose: `docker compose -f docker-co
 | `npm test` | unit-тести (`src/**/*.spec.ts`) |
 | `npm run test:int` | інтеграційні тести (`test/**/*.int-spec.ts`) |
 | `npm run test:all` | обидва набори |
+| `npm run migration:run` / `migration:revert` / `migration:show` | застосувати / відкотити одну / показати міграції (TypeORM CLI через ts-node) |
+| `npm run migration:run:prod` | те саме з `dist/` (у production-образі немає ts-node) |
+| `npm run migration:check` | перевірка дрейфу сутностей відносно схеми; міграції через `migration:generate` не створюємо |
+
+## Міграції
+
+Схему задають SQL-пари в [migrations/](migrations/); правила — [.claude/rules/migrations.md](../.claude/rules/migrations.md).
+Нова пара підключається тонким класом у `src/infrastructure/database/migrations/<YYYYMMDDhhmmss>-<Name>.ts` (за зразком наявних) і рядком у `migrations/index.ts`.
+Кожна міграція виконується в окремій транзакції (`migrationsTransactionMode: 'each'`); для `CREATE INDEX CONCURRENTLY` клас має задати `transaction = false`.
+
+Інтеграційний тест `test/migrations.int-spec.ts` робить roundtrip на окремій БД `<DB_NAME>_migrations_test`: up → повторний up → down ×N → up, і перевіряє 10 таблиць і 33 індекси.
+Без `DB_*` інтеграційні тести беруть Postgres із compose (`localhost:5434`).
 
 ## Як перевірити, що все працює
 
