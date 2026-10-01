@@ -93,17 +93,12 @@ C4Context
 
 ## 4. Solution strategy
 
-<!-- 🎯 Навіщо: 3-4 СТРАТЕГІЧНІ СТОВПИ, з яких потім ростуть усі ADR. Без §4 кожен ADR    -->
-<!--           виглядає випадковим — нема зонтика. ⭐ Найгустіша секція — тут ADR-gate    -->
-<!--           спрацьовує майже завжди (рішення незворотні + мульти-модульні).            -->
-<!-- 📋 Що писати: список з 3-4 виборів. На кожен — заголовок + 2-3 речення rationale.    -->
-<!-- 📌 Приклад: «Зберігати урок як таблицю блоків» — стовп, з якого виросло ADR-0001.    -->
-
 **Top-3 strategic choices (the seeds for ADRs):**
 
-1. **<e.g. Module isolation through events>** — <2-3 sentences rationale referencing Quality Goals and constraints>.
-2. **<e.g. Single-store persistence (Postgres)>** — <2-3 sentences>.
-3. **<e.g. Server-rendered dashboard>** — <2-3 sentences>.
+1. **Фонова обробка у worker-процесі з чергою задач у Postgres** (ADR-0003) — один образ NestJS запускається як `api` (лише HTTP) і `worker` (розбір прайсів і каталогу, каскад зіставлення, забирання фідів за розкладом). Задачі зберігаються в Postgres через pg-boss і створюються в тій самій транзакції, що й запис про імпорт. Розбір 100k рядків триває хвилини й не має блокувати HTTP: QG-2 (p95 ≤ 10 хв) і QG-3 (черга p95 ≤ 1 с під час імпорту).
+2. **Каскад зіставлення у worker** — стадії виконуються послідовно на кожен імпорт: (a) точний нормалізований код (штрихкод / артикул виробника) — єдиний власний товар → автоматичне зіставлення, кілька → пропозиції з поясненням «код неоднозначний» (AC-05, AC-07); (b) запам'ятовані рішення за відбитком позиції — код постачальника + нормалізована назва (AC-10, AC-11; default з PRD §8); (c) пошук кандидатів за схожістю → пропозиції з впевненістю й поясненням (AC-06, AC-08). **Механізм стадії (c) — відкрите рішення в §11** (owner gene.bilyy@gmail.com, due 2026-10-15). Інваріант для всіх стадій: схожість сама по собі зіставлення не створює.
+3. **Позиції постачальника оновлюються на місці** (ADR-0005) — одна таблиця позицій на постачальника з ключем позиції (код постачальника, або хеш нормалізованої назви, якщо коду немає). Новий прайс спершу повністю розбирається у тимчасову staging-таблицю worker-сесії й валідується (AC-03 ціни, AC-04 схема колонок); живі рядки не торкаються, доки валідація не пройшла — так «попередній прайс діє далі». Потім одна транзакція: обчислює відмінності (змінились код/назва → AC-11, позиції немає → `absent_since`, AC-17), робить upsert і фіксує дату прайсу.
+4. **Повний event sourcing для зіставлень і рішень** (ADR-0004) — джерело правди — append-only журнал `match_event` (потік на пару «власний товар ↔ позиція постачальника» в межах магазину). Конкурентність — оптимістична: унікальність (stream_id, stream_version) — друге рішення по тій самій версії отримує конфлікт → 409 «вже вирішено» (PRD §6). Проєкції (`match_view`, `proposal_queue_view`, `remembered_decision_view`) оновлюються синхронно в тій самій транзакції, що й запис події, тож читання черги й цін — прості SELECT (QG-3), а інваріант CONTEXT перевіряється на проєкції `match_view`. Історія AC-13/AC-14 — це сам журнал.
 
 Each tactical decision in later sections should be traceable to one of these strategic seeds. Tactical decisions that *contradict* a strategic choice are red flags — surface them in §11 Risks.
 
@@ -261,25 +256,9 @@ Each top-3 goal from §1 expanded into a full scenario:
 
 ## 11. Risks and technical debt
 
-<!-- 🎯 Навіщо: ⭐ збирає ВСЕ, що може зламатись — і не лише технічне. Без §11 ризики   -->
-<!--           обговорюються на стендапах і губляться; борг лишається у голові того,    -->
-<!--           хто його прийняв.                                                          -->
-<!-- 📋 Що писати: таблиця ризик/борг — серйозність — мітигація — власник. Технічний    -->
-<!--           борг окремою секцією.                                                      -->
-<!-- 📌 Приклад: «EM не пушить — member не оновлює дані | High | …». Перший ризик —      -->
-<!--           часто продуктовий, не технічний. Це нормально.                            -->
-
-<!-- Severity column literals: Low / Medium / High for regular risks; "Open question" for rows
-     created by Step-7 `Save as Open Question` resolutions (see references/socratic-loop.md). -->
-
 | Risk / debt | Severity | Mitigation | Owner |
 |---|---|---|---|
-| <e.g. Outbox lag may reach hours during downstream outage> | Medium | <Alert >10 min, on-call playbook, retry backoff> | <DevOps> |
-| <e.g. No event schema versioning in v1> | Medium | <ADR-NNNN planned for v2, graceful handling of unknown fields> | <Backend> |
-| Open architectural decision: <decision-headline> | Open question | Resolve before <stage trigger or YYYY-MM-DD>; <inline rationale from Step-7 Save-as-OQ> | <owner> |
-
-**Accepted debt (acceptable in v1, plan to fix later):**
-- <e.g. Goal entity is not versioned (immutable) — OK for v1, may need audit versioning in v2>
+| Open architectural decision: механізм пошуку кандидатів за схожістю (стадія (c) каскаду, §4.2) | Open question | Resolve before 2026-10-15; «Порівняти варіанти спайком: pg_trgm, пошук у пам'яті worker, ембедінги — за точністю і часом, перш ніж фіксувати» | gene.bilyy@gmail.com |
 
 ## 12. Glossary
 
