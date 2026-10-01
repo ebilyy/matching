@@ -104,45 +104,52 @@ Each tactical decision in later sections should be traceable to one of these str
 
 ## 5. Building block view
 
-<!-- 🎯 Навіщо: ВНУТРІШНЯ ДЕКОМПОЗИЦІЯ — модулі, контейнери, БД. Статична топологія:   -->
-<!--           хто з ким може говорити. Без §5 §6 (сценарії) не має словника учасників. -->
-<!-- 📋 Що писати: 1 абзац про стиль (шари/гексагональна/clean/на подіях) +            -->
-<!--           дерево папок + Mermaid C4Container.                                       -->
-<!-- 📌 Приклад: «web-app, content-api, media-worker, postgres, s3, cdn».                -->
-
-<One paragraph: layered / hexagonal / clean / event-driven. Why.>
+Модульний моноліт NestJS із шарами s-price (`controllers → services → repositories → entity`): одна кодова база, два режими запуску — `api` і `worker` (ADR-0003). Модулі спілкуються прямими викликами експортованих сервісів, без брокера подій. Межі зафіксовано в ADR-0007; ключове правило — **писати в журнал подій зіставлень (ADR-0004) можна лише через сервіс `match-ledger`**, тож подія і оновлення проєкцій завжди йдуть однією транзакцією. Оригінали завантажених файлів зберігаються в керованому S3-сумісному bucket у ЄС із видаленням через 30 днів (ADR-0006).
 
 **Internal decomposition:**
 
 ```
-<e.g. internal/modules/goals/>
-├── domain/       <entities + sentinel errors>
-├── app/          <use cases / services>
-├── infra/        <repository + outbox impl>
-├── ports/        <HTTP handlers, DTOs, error mapping>
-└── module.go     <self-wiring>
+src/
+├── modules/
+│   ├── catalog/        власні товари: завантаження каталогу (ADR-0002), готовність каталогу (US-01)
+│   ├── suppliers/      постачальники, схема колонок, URL фіду + розклад
+│   ├── file-intake/    спільний конвеєр: upload / fetch (SSRF-guard), ліміти, потоковий розбір XLSX/CSV, staging, валідація
+│   ├── price-import/   імпорт прайсу постачальника: staging → диф → upsert (ADR-0005) → запуск каскаду
+│   ├── matching/       каскад a/b/c (§4) → події через match-ledger
+│   ├── match-ledger/   event store + inline-проєкції + історія (ADR-0004)
+│   ├── review/         черга підтвердження: список, рішення одне/масове, скасування, попередження про низьку впевненість
+│   └── offers/         ціна й наявність на власний товар, застарілість (AC-18), покриття (US-07)
+├── infrastructure/     database (TypeORM), jobs (pg-boss), storage (S3 client)
+└── common/             контекст магазину (§8), помилки, логування
 ```
 
 **C4 Container (L2):**
 
 ```mermaid
 C4Container
-    title <system> — Containers
+    title product-matching — Containers
 
-    Person(user, "<User>")
+    Person(manager, "Менеджер", "менеджер інтернет-магазину")
 
-    Container_Boundary(boundary, "<Our System>") {
-        Container(web, "<Web/API container>", "<technology>", "<purpose>")
-        Container(svc, "<Service container>", "<technology>", "<purpose>")
-        ContainerDb(db, "<DB>", "<technology>", "<purpose>")
+    Container_Boundary(vm, "product-matching (VM, Docker Compose)") {
+        Container(caddy, "Caddy", "Caddy 2.10", "TLS, роздача SPA, reverse proxy на api")
+        Container(spa, "Web UI", "Vue 3.5 SPA, Vite", "каталог, прайси, черга підтвердження, ціни, історія")
+        Container(api, "api", "NestJS 11, Node 24", "HTTP API: catalog, suppliers, review, offers; приймає файли й ставить задачі")
+        Container(worker, "worker", "NestJS 11, Node 24, pg-boss", "розбір файлів, upsert позицій, каскад зіставлення, фіди за розкладом")
+        ContainerDb(pg, "Postgres", "Postgres 18.4", "каталог, позиції постачальників, match_event + проєкції, задачі pg-boss")
     }
 
-    System_Ext(ext, "<External>", "<purpose>")
+    System_Ext(s3, "Object storage (ЄС)", "керований S3-сумісний bucket: оригінали файлів, lifecycle 30 днів")
+    System_Ext(feed, "Фід постачальника", "файл прайсу за публічною http(s)-адресою")
 
-    Rel(user, web, "<interaction>", "<protocol>")
-    Rel(web, svc, "<service calls>")
-    Rel(svc, db, "<reads/writes>", "<driver>")
-    Rel(svc, ext, "<emits>", "<protocol>")
+    Rel(manager, caddy, "Працює в UI", "HTTPS")
+    Rel(caddy, spa, "Роздає статичні файли", "HTTP")
+    Rel(spa, api, "Викликає API через Caddy", "HTTPS/JSON")
+    Rel(api, pg, "Читає проєкції, пише події й задачі", "SQL, pg")
+    Rel(api, s3, "Кладе завантажений файл", "HTTPS, S3 API")
+    Rel(worker, pg, "Бере задачі, upsert позицій, пише події", "SQL, pg")
+    Rel(worker, s3, "Читає файл для розбору", "HTTPS, S3 API")
+    Rel(worker, feed, "Забирає прайс", "HTTPS GET, SSRF-guard")
 ```
 
 ## 6. Runtime view
