@@ -1,0 +1,9 @@
+/*
+ * Vuetify 4 ships its CSS in cascade layers; Tailwind 4 does too. Declaring the order once
+ * lets Tailwind utilities override Vuetify without !important. Tailwind's preflight is left
+ * out: Vuetify's reset (vuetify-core) already normalises the page.
+ */
+@layer theme, base, vuetify-core, vuetify-components, vuetify-overrides, vuetify-utilities, vuetify-final, components, utilities;
+
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
