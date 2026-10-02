@@ -2,11 +2,12 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ShopContextGuard } from '../../common/request-context/shop-context.guard';
 import { SuppliersController } from './controllers/suppliers.controller';
+import { SupplierPositionEntity } from './entities/supplier-position.entity';
 import { SupplierEntity } from './entities/suppliers.entity';
 import { SuppliersService } from './services/suppliers.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([SupplierEntity])],
+  imports: [TypeOrmModule.forFeature([SupplierEntity, SupplierPositionEntity])],
   controllers: [SuppliersController],
   providers: [SuppliersService, ShopContextGuard],
   exports: [SuppliersService],

@@ -1,49 +1,20 @@
-import { DataSource } from 'typeorm';
-import { v7 as uuidv7 } from 'uuid';
-import { parseDatabaseEnv } from '../src/common/config/env';
-import { buildDataSourceOptions } from '../src/infrastructure/database/data-source-options';
+import type { DataSource } from 'typeorm';
 import { SupplierEntity } from '../src/modules/suppliers/entities/suppliers.entity';
-import { buildSupplier } from './fixtures/suppliers.fixture';
+import { buildSupplier, createShop } from './fixtures';
+import { createTestDatabase, dropTestDatabase } from './support/test-database';
 
 // SupplierEntity ↔ suppliers table: the mapping round-trips through a real Postgres.
-const env = parseDatabaseEnv(process.env);
-const TEST_DB = `${env.DB_NAME}_suppliers_test`;
-
-async function withAdmin(sql: string): Promise<void> {
-  const admin = new DataSource({
-    ...buildDataSourceOptions(env),
-    migrations: [],
-  });
-  await admin.initialize();
-  try {
-    await admin.query(sql);
-  } finally {
-    await admin.destroy();
-  }
-}
-
 describe('SupplierEntity', () => {
   let ds: DataSource;
   let shopId: string;
 
   beforeAll(async () => {
-    await withAdmin(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
-    await withAdmin(`CREATE DATABASE ${TEST_DB}`);
-    ds = new DataSource({
-      ...buildDataSourceOptions({ ...env, DB_NAME: TEST_DB }),
-      entities: [SupplierEntity],
-    });
-    await ds.initialize();
-    await ds.runMigrations();
-    shopId = uuidv7();
-    await ds.query(`INSERT INTO shops (id, name) VALUES ($1, 'Test Shop')`, [
-      shopId,
-    ]);
+    ds = await createTestDatabase('suppliers');
+    shopId = (await createShop(ds)).id;
   });
 
   afterAll(async () => {
-    await ds?.destroy();
-    await withAdmin(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
+    await dropTestDatabase(ds);
   });
 
   it('persists the test supplier with its contact fields', async () => {

@@ -1,5 +1,6 @@
-import { Column, Entity } from 'typeorm';
+import { Column, Entity, ForeignKey, Unique } from 'typeorm';
 import { AbstractEntity } from '../../../common/entities/abstract.entity';
+import { ShopEntity } from '../../shops/entities/shop.entity';
 
 export interface ColumnMappingEntry {
   header: string;
@@ -13,8 +14,10 @@ export interface ColumnMapping {
 
 // Schema: migrations/20261001120003_create_suppliers + 20261001120010_add_contacts_to_suppliers.
 @Entity({ name: 'suppliers' })
+@Unique('uq_suppliers_shop_id_id', ['shopId', 'id'])
 export class SupplierEntity extends AbstractEntity {
   @Column({ name: 'shop_id', type: 'uuid' })
+  @ForeignKey(() => ShopEntity, { name: 'suppliers_shop_id_fkey' })
   shopId: string;
 
   @Column({ name: 'name', type: 'varchar', length: 200 })

@@ -1,5 +1,5 @@
 import { BeforeInsert, CreateDateColumn, PrimaryColumn } from 'typeorm';
-import { v7 as uuidv7 } from 'uuid';
+import { newId } from '../ids/new-id';
 
 // Matches rules/migrations.md: UUID v7 PK generated app-side, created_at only,
 // no soft delete (hard delete + audit table), updated_at is opt-in per entity.
@@ -16,6 +16,6 @@ export abstract class AbstractEntity {
   // Fires on repository.save() only; QueryBuilder inserts must set id themselves.
   @BeforeInsert()
   protected assignId(): void {
-    this.id ??= uuidv7();
+    this.id ??= newId();
   }
 }
