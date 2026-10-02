@@ -1,9 +1,12 @@
-import { Expose, plainToInstance } from 'class-transformer';
+import { Expose, plainToInstance, Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsOptional,
   IsString,
+  IsUrl,
   Max,
   Min,
   validateSync,
@@ -53,7 +56,52 @@ export class DatabaseEnv {
   DB_NAME: string;
 }
 
-export class Env extends DatabaseEnv {
+const SSE_MODES = ['AES256', 'aws:kms'] as const;
+
+// Upload originals (ADR-0006, T07). Endpoint is set for MinIO / non-AWS S3 only;
+// credentials may be absent when the runtime provides them (instance role).
+export class StorageEnv extends DatabaseEnv {
+  @Expose()
+  @IsOptional()
+  @IsUrl({ require_tld: false, protocols: ['http', 'https'] })
+  S3_ENDPOINT?: string;
+
+  @Expose()
+  @IsString()
+  @IsNotEmpty()
+  S3_REGION: string = 'eu-central-1';
+
+  @Expose()
+  @IsString()
+  @IsNotEmpty()
+  S3_BUCKET: string;
+
+  @Expose()
+  @IsOptional()
+  @IsString()
+  S3_ACCESS_KEY_ID?: string;
+
+  @Expose()
+  @IsOptional()
+  @IsString()
+  S3_SECRET_ACCESS_KEY?: string;
+
+  // MinIO needs path-style URLs. Implicit conversion would turn 'false' into true.
+  @Expose()
+  @Transform(({ obj }: { obj: Record<string, unknown> }) =>
+    [true, 'true', '1'].includes(obj.S3_FORCE_PATH_STYLE as string | boolean),
+  )
+  @IsBoolean()
+  S3_FORCE_PATH_STYLE: boolean = false;
+
+  // Unset in dev: MinIO without a KMS rejects SSE headers. Set in the managed bucket.
+  @Expose()
+  @IsOptional()
+  @IsIn(SSE_MODES)
+  S3_SERVER_SIDE_ENCRYPTION?: (typeof SSE_MODES)[number];
+}
+
+export class Env extends StorageEnv {
   @Expose()
   @IsIn(APP_ROLES)
   APP_ROLE: AppRole;

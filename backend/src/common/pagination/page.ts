@@ -11,11 +11,12 @@ export type Page<T> = {
   prev_cursor: string | null;
 };
 
-// Keyset pagination by UUID v7 id ascending (oldest first). `qb` carries the
-// list's own filters; this adds the cursor condition, order and limit.
+// Keyset pagination by UUID v7 id: `ASC` = oldest first, `DESC` = newest first.
+// `qb` carries the list's own filters; this adds the cursor condition, order and limit.
 export async function paginateById<E extends ObjectLiteral & { id: string }>(
   qb: SelectQueryBuilder<E>,
   query: PageQueryDto,
+  order: 'ASC' | 'DESC' = 'ASC',
 ): Promise<Page<E>> {
   if (query.after && query.before) {
     throw validationFailed([
@@ -24,18 +25,21 @@ export async function paginateById<E extends ObjectLiteral & { id: string }>(
   }
   const alias = qb.alias;
   const backwards = Boolean(query.before);
+  const reverse = order === 'ASC' ? 'DESC' : 'ASC';
+  const ahead = order === 'ASC' ? '>' : '<';
+  const behind = order === 'ASC' ? '<' : '>';
 
   if (query.after) {
-    qb.andWhere(`${alias}.id > :cursor`, {
+    qb.andWhere(`${alias}.id ${ahead} :cursor`, {
       cursor: decodeIdCursor(query.after, 'after'),
     });
   } else if (query.before) {
-    qb.andWhere(`${alias}.id < :cursor`, {
+    qb.andWhere(`${alias}.id ${behind} :cursor`, {
       cursor: decodeIdCursor(query.before, 'before'),
     });
   }
   const rows = await qb
-    .orderBy(`${alias}.id`, backwards ? 'DESC' : 'ASC')
+    .orderBy(`${alias}.id`, backwards ? reverse : order)
     .take(query.limit + 1)
     .getMany();
 

@@ -5,7 +5,10 @@ import {
 } from '@nestjs/common';
 import { type FieldViolation, validationFailed } from '../errors/app-error';
 
-function flatten(errors: ValidationError[], prefix = ''): FieldViolation[] {
+export function flatten(
+  errors: ValidationError[],
+  prefix = '',
+): FieldViolation[] {
   return errors.flatMap((e) => {
     const field = prefix ? `${prefix}.${e.property}` : e.property;
     const own = Object.values(e.constraints ?? {}).map((problem) => ({

@@ -17,7 +17,7 @@ Status values: `todo` · `blocked` · `in-progress` · `in-review` · `done`. Up
 | T04 | [Map TypeORM entities for all 10 tables and add test fixture factories](./t04-entities-fixtures.md) | domain | L (8h) | P0 | T02 | gene.bilyy@gmail.com | in-progress | — |
 | T05 | [Enforce shop_id on every query (base repository + raw-SQL helper + isolation harness)](./t05-tenant-scoped-data-access.md) | infra/repo | M (4h) | P0 | T03, T04 | gene.bilyy@gmail.com | todo | — |
 | T06 | [Set up pg-boss queues with enqueue-in-transaction and versioned payloads](./t06-job-queue-infra.md) | infra | M (4h) | P0 | T03 | gene.bilyy@gmail.com | todo | — |
-| T07 | [Add an S3 storage adapter for uploaded originals](./t07-object-storage-adapter.md) | infra | M (3h) | P0 | T01 | gene.bilyy@gmail.com | todo | — |
+| T07 | [Add an S3 storage adapter for uploaded originals](./t07-object-storage-adapter.md) | infra | M (3h) | P0 | T01 | gene.bilyy@gmail.com | in-progress | — |
 | T08 | [Build the shared upload intake: limits, 30/h rate limit, import row + job in one tx](./t08-file-intake-upload.md) | app/service | M (4h) | P0 | T05, T06, T07 | gene.bilyy@gmail.com | todo | — |
 | T09 | [Stream-parse XLSX/CSV into a session TEMP staging table](./t09-streaming-parse-staging.md) | app/service | L (8h) | P0 | T02, T07 | gene.bilyy@gmail.com | todo | — |
 | T10 | [Validate and normalise staging rows; detect column-schema drift](./t10-staging-validation.md) | domain | L (6h) | P0 | T09 | gene.bilyy@gmail.com | todo | — |
@@ -25,7 +25,7 @@ Status values: `todo` · `blocked` · `in-progress` · `in-review` · `done`. Up
 | T12 | [Ship catalog import: POST /catalog/imports + catalog.import job](./t12-catalog-import.md) | ports + app | L (6h) | P0 | T08, T10 | gene.bilyy@gmail.com | todo | — |
 | T13 | [Add catalog readiness and own-products list endpoints](./t13-catalog-readiness-and-list.md) | ports | M (3h) | P0 | T05 | gene.bilyy@gmail.com | todo | — |
 | T14 | [Add suppliers list / create / get with price staleness](./t14-suppliers-api.md) | ports + app | M (4h) | P0 | T05 | gene.bilyy@gmail.com | todo | — |
-| T15 | [Add imports list and detail endpoints](./t15-imports-read-api.md) | ports | M (3h) | P0 | T05 | gene.bilyy@gmail.com | todo | — |
+| T15 | [Add imports list and detail endpoints](./t15-imports-read-api.md) | ports | M (3h) | P0 | T05 | gene.bilyy@gmail.com | in-progress | — |
 | T16 | [Build match-ledger append with inline projections for system events](./t16-ledger-append-system-events.md) | domain + infra | L (8h) | P0 | T05 | gene.bilyy@gmail.com | todo | — |
 | T17 | [Add decision events and the own-product history read](./t17-ledger-decisions-history.md) | domain + ports | L (6h) | P0 | T16 | gene.bilyy@gmail.com | todo | — |
 | T18 | [Add price upload and confirm-mapping endpoints](./t18-price-upload-and-mapping.md) | ports | M (4h) | P0 | T08, T14 | gene.bilyy@gmail.com | todo | — |
